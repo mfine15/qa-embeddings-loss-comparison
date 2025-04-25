@@ -9,6 +9,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import pandas as pd
 import wandb
+from collections import defaultdict
 
 def ndcg_at_k(relevances, k):
     """
@@ -106,9 +107,11 @@ def evaluate_model(model, test_dataloader, device, k_values=[1, 5, 10]):
     all_question_ids = []  # To track which answers belong to which questions
     
     # Extract data to track which answers belong to which questions
-    question_data = {}  # Map question ID to list of answer indices
+    question_data = defaultdict(list)  # Map question ID to list of answer indices
     
     with torch.no_grad():
+        start_idx = 0  # Track the absolute index in the final concatenated tensor
+        
         for batch_idx, batch in enumerate(tqdm(test_dataloader, desc="Calculating embeddings")):
             # Get embeddings
             q_embeddings = model(batch['q_input_ids'].to(device), 
@@ -120,17 +123,25 @@ def evaluate_model(model, test_dataloader, device, k_values=[1, 5, 10]):
             all_q_embeddings.append(q_embeddings.cpu())
             all_a_embeddings.append(a_embeddings.cpu())
             
-            # Track question IDs (create indices if not provided)
+            # Track question IDs from batch
             batch_size = q_embeddings.shape[0]
-            q_ids = batch.get('question_id', [f"{batch_idx}_{i}" for i in range(batch_size)])
+            
+            # Use question_id from batch, or create dummy IDs if not available
+            if 'question_id' in batch:
+                q_ids = batch['question_id']
+            else:
+                q_ids = [f"batch{batch_idx}_item{i}" for i in range(batch_size)]
+                
             all_question_ids.extend(q_ids)
             
-            # Store indices of this batch
-            start_idx = sum(len(e) for e in all_a_embeddings[:-1])
-            for i, q_id in enumerate(q_ids):
-                if q_id not in question_data:
-                    question_data[q_id] = []
-                question_data[q_id].append(start_idx + i)
+            # Store which answers belong to which questions
+            for i in range(batch_size):
+                idx = start_idx + i  # Absolute index in the concatenated tensor
+                q_id = q_ids[i]
+                question_data[q_id].append(idx)
+            
+            # Update the start index for the next batch
+            start_idx += batch_size
     
     # Concatenate all embeddings
     all_q_embeddings = torch.cat(all_q_embeddings, dim=0)
@@ -245,25 +256,33 @@ def evaluate_model(model, test_dataloader, device, k_values=[1, 5, 10]):
         # 3. Hard negative ranking (only answers to same question)
         # Skip if there's only one answer for this question
         if len(hard_negative_indices) > 1:
-            # Get similarities for just the answers to this question
-            hard_neg_similarities = query_similarities[hard_negative_indices]
-            
-            # Create relevance scores for just these answers
-            hard_neg_relevance = np.zeros_like(hard_neg_similarities)
-            hard_neg_relevance[hard_negative_indices.index(i)] = 1  # Mark correct answer
-            
-            # Sort by similarity (descending)
-            hard_neg_sorted_indices = np.argsort(-hard_neg_similarities)
-            hard_neg_sorted_relevances = hard_neg_relevance[hard_neg_sorted_indices]
-            
-            # Calculate MRR for hard negatives
-            query_mrr_hard_neg = mrr(hard_neg_sorted_relevances)
-            metrics['mrr_hard_neg'] += query_mrr_hard_neg
-            per_query_metrics['mrr_hard_neg'].append(query_mrr_hard_neg)
-            
-            # Add accuracy@1 for hard negatives
-            correct_idx_in_hard_neg = hard_negative_indices.index(i)
-            metrics['accuracy@1_hard_neg'] += 1.0 if hard_neg_sorted_indices[0] == correct_idx_in_hard_neg else 0.0
+            try:
+                # Find position of current query (i) in the list of indices for this question
+                position_in_hard_negatives = hard_negative_indices.index(i)
+                
+                # Get similarities for just the answers to this question
+                hard_neg_similarities = query_similarities[hard_negative_indices]
+                
+                # Create relevance scores for just these answers (all zeros except the current query)
+                hard_neg_relevance = np.zeros(len(hard_negative_indices))
+                hard_neg_relevance[position_in_hard_negatives] = 1  # Mark correct answer
+                
+                # Sort by similarity (descending)
+                hard_neg_sorted_indices = np.argsort(-hard_neg_similarities)
+                hard_neg_sorted_relevances = hard_neg_relevance[hard_neg_sorted_indices]
+                
+                # Calculate MRR for hard negatives
+                query_mrr_hard_neg = mrr(hard_neg_sorted_relevances)
+                metrics['mrr_hard_neg'] += query_mrr_hard_neg
+                per_query_metrics['mrr_hard_neg'].append(query_mrr_hard_neg)
+                
+                # Add accuracy@1 for hard negatives
+                metrics['accuracy@1_hard_neg'] += 1.0 if hard_neg_sorted_indices[0] == position_in_hard_negatives else 0.0
+            except ValueError:
+                # This should not happen if the data is correctly structured,
+                # but we'll handle it just in case
+                print(f"Warning: Query index {i} not found in its own hard negative indices {hard_negative_indices}")
+                continue
     
     # Average metrics across all queries
     for key in metrics:
