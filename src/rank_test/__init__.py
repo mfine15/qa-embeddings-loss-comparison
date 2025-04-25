@@ -8,7 +8,6 @@ from rank_test.dataset import QADataset, QABatchedDataset, QATripletDataset, cre
 from rank_test.evaluate import evaluate_model, compare_models
 from rank_test.train import train_model
 from rank_test.config import ExperimentConfig, default_configs
-from rank_test.run_experiment import run_single_experiment, run_experiment_suite
 
 def main() -> None:
     print("Hello from rank-test!")

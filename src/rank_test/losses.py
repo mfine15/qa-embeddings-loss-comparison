@@ -371,6 +371,110 @@ class ListwiseRankingLoss(BaseLoss):
 
 
 # Factory function to create loss based on name
+class EnhancedInfoNCELoss(BaseLoss):
+    """InfoNCE loss with extra penalty for hard negatives (answers to same question)"""
+    
+    def __init__(self, temperature=0.1, hard_negative_weight=2.0):
+        super(EnhancedInfoNCELoss, self).__init__()
+        self.temperature = temperature
+        self.hard_negative_weight = hard_negative_weight
+        self.name = f"enhanced_infonce_t{temperature}_hnw{hard_negative_weight}"
+        
+    def forward(self, q_embeddings, a_embeddings, question_ids=None, **kwargs):
+        """
+        Calculate InfoNCE loss with extra penalty for hard negatives
+        
+        Args:
+            q_embeddings: Question embeddings (batch_size, embed_dim)
+            a_embeddings: Answer embeddings (batch_size, embed_dim)
+            question_ids: Question IDs for identifying hard negatives
+            
+        Returns:
+            loss: Loss value
+            metrics: Dictionary with accuracy and hard negative metrics
+        """
+        batch_size = q_embeddings.shape[0]
+        device = q_embeddings.device
+        
+        # Calculate similarity matrix
+        similarity = torch.matmul(q_embeddings, a_embeddings.T)
+        
+        # Scale by temperature
+        logits = similarity / self.temperature
+        
+        # Standard InfoNCE loss - use diagonal as positive examples
+        labels = torch.arange(batch_size, device=device)
+        infonce_loss = F.cross_entropy(logits, labels)
+        
+        # Calculate accuracy: whether correct answer has highest similarity
+        predictions = torch.argmax(similarity, dim=1)
+        accuracy = (predictions == labels).float().mean().item()
+        
+        # Initialize metrics
+        metrics = {
+            'base_loss': infonce_loss.item(),
+            'acc': accuracy,
+            'hard_neg_loss': 0.0
+        }
+        
+        # Add extra penalty for hard negatives if question IDs are provided
+        if question_ids is not None:
+            # Group query indices by question ID
+            question_groups = defaultdict(list)
+            for i, q_id in enumerate(question_ids):
+                # Handle different question ID formats
+                if isinstance(q_id, torch.Tensor):
+                    q_id = q_id.item()
+                elif hasattr(q_id, 'decode'):
+                    q_id = q_id.decode()
+                    
+                question_groups[q_id].append(i)
+            
+            # Calculate hard negative loss for questions with multiple answers
+            questions_with_hard_negatives = 0
+            hard_negative_pairs = 0
+            hard_negative_loss = 0.0
+            
+            for q_id, indices in question_groups.items():
+                if len(indices) <= 1:
+                    continue
+                    
+                questions_with_hard_negatives += 1
+                
+                # For each query in this group
+                for idx in indices:
+                    # Get similarities between this query and other answers to the same question
+                    other_indices = [j for j in indices if j != idx]
+                    hard_negative_pairs += len(other_indices)
+                    
+                    # Skip if no other answers 
+                    if not other_indices:
+                        continue
+                        
+                    # Calculate similarity to hard negatives
+                    hard_neg_sim = similarity[idx, other_indices]
+                    
+                    # Add penalty (we want to minimize similarity to hard negatives)
+                    hard_negative_loss += torch.mean(hard_neg_sim)
+            
+            # Only add to loss if we found hard negatives
+            if hard_negative_pairs > 0:
+                # Scale the hard negative loss
+                scaled_hard_negative_loss = (hard_negative_loss / hard_negative_pairs) * self.hard_negative_weight
+                total_loss = infonce_loss + scaled_hard_negative_loss
+                
+                metrics['hard_neg_loss'] = scaled_hard_negative_loss.item()
+                metrics['hard_neg_count'] = hard_negative_pairs
+                metrics['questions_with_hard_negs'] = questions_with_hard_negatives
+            else:
+                total_loss = infonce_loss
+        else:
+            total_loss = infonce_loss
+            
+        metrics['loss'] = total_loss.item()
+        return total_loss, metrics
+
+
 def create_loss(loss_name, **kwargs):
     """Factory function for creating loss functions"""
     losses = {
@@ -380,7 +484,8 @@ def create_loss(loss_name, **kwargs):
         "mse": MSELoss,
         "triplet": TripletLoss,
         "listwise": ListwiseRankingLoss,
-        "listwise_no_batch_neg": lambda **kw: ListwiseRankingLoss(in_batch_negatives=False, **kw)
+        "listwise_no_batch_neg": lambda **kw: ListwiseRankingLoss(in_batch_negatives=False, **kw),
+        "enhanced_infonce": EnhancedInfoNCELoss
     }
     
     if loss_name not in losses:

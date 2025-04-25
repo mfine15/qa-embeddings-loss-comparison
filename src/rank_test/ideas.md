@@ -1,0 +1,9 @@
+- pairwise losse
+- ranking loss with only hard negatives
+- ranking loss with hard negatives + in batch negatives
+- info nce loss with hard negatives (documents lower than the positive from the same question)
+- info nce loss w/o hard negatives, only taking the top document
+- info nce loss taking random document
+- info nce loss with multiple positives, all documents
+- info nce loss with hard negatives, weighted by the score/rank
+- info nce loss but multiple rows per question (one per document), with no hard negatives (this might be bad because it treats other positive documents from the same query as in batch negatives, but we want to experiment)
