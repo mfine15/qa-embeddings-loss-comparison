@@ -42,7 +42,8 @@ def run_single_experiment(config_path=None, config_dict=None, config_name=None):
     data_path = config.get('data_path', 'data/ranked_qa.json')
     ensure_dataset_exists(
         data_path=data_path,
-        data_limit=config.get_limit()
+        data_limit=config.get_limit(),
+        force_regenerate=config.get('force_regenerate', False)
     )
     
     # Train model
@@ -132,6 +133,7 @@ def main():
     parser.add_argument("--epochs", type=int, help="Override epochs")
     parser.add_argument("--batch-size", type=int, help="Override batch size")
     parser.add_argument("--debug", action="store_true", help="Debug mode with minimal samples")
+    parser.add_argument("--force-regenerate", action="store_true", help="Force dataset regeneration even if it exists")
     
     args = parser.parse_args()
     
@@ -175,6 +177,9 @@ def main():
             config['batch_size'] = args.batch_size
         if args.debug:
             config['debug'] = True
+            
+        if args.force_regenerate:
+            config['force_regenerate'] = True
         
         # Create output directory with timestamp
         single_output = os.path.join(args.output, f"{config.get('loss')}-{timestamp}")

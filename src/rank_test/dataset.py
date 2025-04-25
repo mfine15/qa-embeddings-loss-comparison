@@ -12,7 +12,6 @@ import sqlite3
 from collections import defaultdict
 from torch.utils.data import Dataset, DataLoader, random_split
 from transformers import DistilBertTokenizer
-import numpy as np
 from tqdm import tqdm
 
 class QADataset(Dataset):
@@ -421,7 +420,7 @@ def download_dataset():
         a_size = os.path.getsize("data/Answers.csv")
         # If files are reasonable size, assume they're valid
         if q_size > 10000 and a_size > 10000:
-            print(f"Found existing dataset files:")
+            print("Found existing dataset files:")
             print(f"  Questions.csv: {q_size/1_000_000:.1f} MB")
             print(f"  Answers.csv: {a_size/1_000_000:.1f} MB")
             return "data"
@@ -448,7 +447,7 @@ def download_dataset():
         if os.path.exists("data/Questions.csv") and os.path.exists("data/Answers.csv"):
             q_size = os.path.getsize("data/Questions.csv")
             a_size = os.path.getsize("data/Answers.csv")
-            print(f"Dataset files:")
+            print("Dataset files:")
             print(f"  Questions.csv: {q_size/1_000_000:.1f} MB")
             print(f"  Answers.csv: {a_size/1_000_000:.1f} MB")
             return "data"
@@ -793,26 +792,58 @@ def export_to_json(questions, answers, output_path="data/ranked_qa.json"):
     print(f"Exported {len(data)} question-answer sets to {output_path}")
 
 
-def ensure_dataset_exists(data_path='data/ranked_qa.json', data_limit=None, use_sqlite=False):
-    """Ensure the dataset exists, generating it if necessary."""
-    # Check if the dataset file exists
-    if os.path.exists(data_path):
-        print(f"Found existing dataset at {data_path}")
-        return
+def ensure_dataset_exists(data_path='data/ranked_qa.json', data_limit=None, use_sqlite=False, force_regenerate=False):
+    """
+    Ensure the dataset exists, generating it if necessary.
     
-    print(f"Dataset not found at {data_path}. Generating it...")
+    Args:
+        data_path: Path where the JSON dataset should be stored
+        data_limit: Limit the number of questions to process
+        use_sqlite: Whether to use SQLite instead of CSV files
+        force_regenerate: Force regeneration even if file exists
+    """
+    # Check current limit if file exists
+    current_limit = None
+    regenerate_needed = force_regenerate
     
-    # Get path for data directory
-    data_dir = download_dataset()
-    
-    # Choose parser based on user preference
-    if use_sqlite and os.path.exists(os.path.join(data_dir, "database.sqlite")):
-        db_path = os.path.join(data_dir, "database.sqlite")
-        print(f"Using SQLite database at {db_path}")
-        questions, answers = parse_from_sqlite(db_path, limit=data_limit)
+    if os.path.exists(data_path) and not force_regenerate:
+        # Try to determine the current limit from the dataset
+        try:
+            with open(data_path, 'r') as f:
+                data = json.load(f)
+                current_limit = len(data)
+                print(f"Found existing dataset at {data_path} with {current_limit} items")
+                
+                # If data_limit is specified and different from current, regenerate
+                if data_limit is not None and data_limit != current_limit:
+                    print(f"Requested limit ({data_limit}) differs from current dataset size ({current_limit})")
+                    regenerate_needed = True
+                else:
+                    return  # Dataset exists with correct limit
+        except Exception as e:
+            print(f"Error reading existing dataset: {e}")
+            regenerate_needed = True  # Regenerate if there's an issue with the file
     else:
-        print(f"Using CSV files in {data_dir}")
-        questions, answers = parse_posts(data_dir, limit=data_limit)
+        regenerate_needed = True
     
-    # Export to JSON
-    export_to_json(questions, answers, data_path)
+    if regenerate_needed:
+        if os.path.exists(data_path):
+            action = "Regenerating" if force_regenerate else "Updating"
+            print(f"{action} dataset at {data_path} with limit={data_limit}")
+        else:
+            print(f"Dataset not found at {data_path}. Generating it with limit={data_limit}")
+        
+        # Get path for data directory
+        data_dir = download_dataset()
+        
+        # Choose parser based on user preference
+        if use_sqlite and os.path.exists(os.path.join(data_dir, "database.sqlite")):
+            db_path = os.path.join(data_dir, "database.sqlite")
+            print(f"Using SQLite database at {db_path}")
+            questions, answers = parse_from_sqlite(db_path, limit=data_limit)
+        else:
+            print(f"Using CSV files in {data_dir}")
+            questions, answers = parse_posts(data_dir, limit=data_limit)
+        
+        # Export to JSON
+        export_to_json(questions, answers, data_path)

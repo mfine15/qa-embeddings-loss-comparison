@@ -13,7 +13,7 @@ import numpy as np
 
 from rank_test.models import QAEmbeddingModel
 from rank_test.losses import create_loss
-from rank_test.dataset import QADataset, QABatchedDataset, QATripletDataset, create_dataloaders
+from rank_test.dataset import QADataset, QABatchedDataset, QATripletDataset, create_dataloaders, ensure_dataset_exists
 from rank_test.evaluate import evaluate_model
 
 def get_device():
@@ -240,6 +240,14 @@ def train_model(config):
     checkpoint_interval = config.get('checkpoint_interval', 1)
     eval_steps = config.get('eval_steps', None)  # Number of steps between evaluations
     eval_at_zero = config.get('eval_at_zero', False)  # Whether to evaluate before training
+    force_regenerate = config.get('force_regenerate', False)  # Force dataset regeneration
+    
+    # Ensure dataset exists and matches requested limit
+    ensure_dataset_exists(
+        data_path=data_path,
+        data_limit=limit,
+        force_regenerate=force_regenerate
+    )
     
     # Get device
     device = get_device()
@@ -268,6 +276,7 @@ def train_model(config):
             'loss_kwargs': loss_kwargs,
             'eval_steps': eval_steps,
             'eval_at_zero': config.get('eval_at_zero', False),
+            'force_regenerate': force_regenerate,
             
             # Hardware
             'device': str(device),
@@ -483,6 +492,8 @@ def main():
                         help="Run evaluation after every N steps (default: None, evaluate only at end of training)")
     parser.add_argument("--eval-at-zero", action="store_true",
                         help="Run evaluation at step 0, before any training")
+    parser.add_argument("--force-regenerate", action="store_true",
+                        help="Force dataset regeneration even if it exists")
     parser.add_argument("--no-wandb", action="store_true",
                         help="Disable wandb logging")
     
@@ -502,6 +513,7 @@ def main():
         'seed': args.seed,
         'eval_steps': args.eval_steps,
         'eval_at_zero': args.eval_at_zero,
+        'force_regenerate': args.force_regenerate,
         'log_to_wandb': not args.no_wandb,
     }
     
