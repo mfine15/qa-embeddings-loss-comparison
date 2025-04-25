@@ -594,7 +594,7 @@ class ListwiseRankingLoss(BaseLoss):
         return torch.sum(gain / torch.log2(ranks + 1))
 
 # Factory function to create a loss by name
-def create_flexible_loss(loss_name, **kwargs):
+def create_loss(loss_name, **kwargs):
     """
     Factory function to create a loss by name
     

@@ -27,7 +27,7 @@ def clean_html(text: str) -> str:
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-class FlexibleQADataset(Dataset):
+class QADataset(Dataset):
     """
     Flexible QA dataset that supports various batch transformation strategies.
     This dataset provides configurable approaches for creating training data

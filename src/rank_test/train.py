@@ -19,11 +19,11 @@ from transformers import DistilBertTokenizerFast
 from rank_test.config import ExperimentConfig, PREDEFINED_CONFIGS
 from rank_test.models import QAEmbeddingModel
 from rank_test.dataset import (
-    FlexibleQADataset, 
+    QADataset, 
     get_batch_transform,
     ensure_dataset_exists
 )
-from rank_test.losses import create_flexible_loss
+from rank_test.losses import create_loss
 from rank_test.evaluate import evaluate_model
 
 
@@ -401,7 +401,7 @@ def train_model(config: ExperimentConfig):
         
         # Create flexible dataset for training
         print("Creating flexible dataset")
-        dataset = FlexibleQADataset(
+        dataset = QADataset(
             data_path=data_path,
             batch_transform_fn=batch_transform_fn,
             batch_size=config.get_batch_size(),
@@ -416,7 +416,7 @@ def train_model(config: ExperimentConfig):
         
         # Create dataloader
         print("Creating train dataloader")
-        train_loader = FlexibleQADataset.get_dataloader(dataset, shuffle=True)
+        train_loader = QADataset.get_dataloader(dataset, shuffle=True)
         
         # Create standardized test dataset that's consistent across all training methods
         print("Creating standardized test dataset")
@@ -424,7 +424,7 @@ def train_model(config: ExperimentConfig):
         test_transform_fn = get_batch_transform("standardized_test")
         test_batch_size = min(len(test_data), config.get_batch_size() * 4)  # Use larger batches for testing
         
-        test_dataset = FlexibleQADataset(
+        test_dataset = QADataset(
             data_path=data_path,
             batch_transform_fn=test_transform_fn,
             batch_size=test_batch_size,
@@ -436,7 +436,7 @@ def train_model(config: ExperimentConfig):
         # Recreate batches with test data
         test_dataset.batches = test_dataset._create_batches()
         
-        test_loader = FlexibleQADataset.get_dataloader(test_dataset, shuffle=False)
+        test_loader = QADataset.get_dataloader(test_dataset, shuffle=False)
         
         print(f"Created flexible dataset with {len(dataset)} batches")
         print(f"Test dataset: {len(test_dataset)} batches")
@@ -446,7 +446,7 @@ def train_model(config: ExperimentConfig):
     
     # Create loss function
     loss_kwargs = config.get_loss_kwargs()
-    loss_fn = create_flexible_loss(config.loss_type, **loss_kwargs)
+    loss_fn = create_loss(config.loss_type, **loss_kwargs)
     print(f"Using loss function: {loss_fn.get_name()}")
     
     # Create optimizer
