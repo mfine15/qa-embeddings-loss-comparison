@@ -1,10 +1,18 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+"""
+Flexible loss functions that work with various data sampling strategies.
+These losses are designed to work with the output of the flexible dataset module.
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+from typing import Dict, Tuple, List, Any, Optional
+from collections import defaultdict
+
 
 class BaseLoss(nn.Module):
     """Base class for all loss functions"""
@@ -33,183 +41,416 @@ class BaseLoss(nn.Module):
         return self.name
 
 
-class InfoNCELoss(BaseLoss):
-    """InfoNCE contrastive loss with configurable options for negatives"""
+class StandardInfoNCELoss(BaseLoss):
+    """Standard InfoNCE loss with in-batch negatives"""
     
-    def __init__(self, temperature=0.1, in_batch_negatives=True, hard_negatives=True):
-        super(InfoNCELoss, self).__init__()
+    def __init__(self, temperature=0.1):
+        super().__init__()
         self.temperature = temperature
-        self.in_batch_negatives = in_batch_negatives
-        self.hard_negatives = hard_negatives
-        self.name = f"infonce_t{temperature}_ibn{int(in_batch_negatives)}_hn{int(hard_negatives)}"
+        self.name = f"std_infonce_t{temperature}"
         
-    def forward(self, q_embeddings, a_embeddings, a_negatives=None, **kwargs):
+    def forward(self, q_embeddings, a_embeddings, **kwargs):
         """
-        Calculate InfoNCE loss with configurable negatives
+        Calculate standard InfoNCE loss with in-batch negatives
         
         Args:
             q_embeddings: Question embeddings (batch_size, embed_dim)
             a_embeddings: Answer embeddings (batch_size, embed_dim)
-            a_negatives: Optional hard negative answer embeddings (batch_size, num_negs, embed_dim)
-        
+            
         Returns:
-            loss: Loss value
-            metrics: Dictionary with accuracy and other metrics
+            loss: InfoNCE loss
+            metrics: Dictionary with accuracy metrics
         """
         batch_size = q_embeddings.shape[0]
         
-        # Create similarity matrix between questions and answers
-        if self.in_batch_negatives:
-            # With in-batch negatives: compute full similarity matrix
-            similarity = torch.matmul(q_embeddings, a_embeddings.T) / self.temperature
-            # Labels are on the diagonal (each question matched with its answer)
-            labels = torch.arange(batch_size, device=q_embeddings.device)
-            
-            # Compute InfoNCE loss (bidirectional)
-            loss_q2a = F.cross_entropy(similarity, labels)
-            loss_a2q = F.cross_entropy(similarity.T, labels)
-            loss = (loss_q2a + loss_a2q) / 2
-            
-            # Calculate accuracy metrics
-            q2a_preds = torch.argmax(similarity, dim=1)
-            a2q_preds = torch.argmax(similarity.T, dim=1)
-            q2a_acc = (q2a_preds == labels).float().mean()
-            a2q_acc = (a2q_preds == labels).float().mean()
-            
-            metrics = {
-                'loss': loss.item(),
-                'q2a_acc': q2a_acc.item(),
-                'a2q_acc': a2q_acc.item(),
-                'avg_acc': (q2a_acc.item() + a2q_acc.item()) / 2
-            }
-        else:
-            # Without in-batch negatives: compare each question only with its own answers
-            # Each question has a positive answer and optionally hard negatives
-            
-            # Initialize logits and labels for each question
-            all_logits = []
-            all_labels = []
-            
-            # For each question, calculate its similarity with positive and negative answers
-            for i in range(batch_size):
-                q_embed = q_embeddings[i:i+1]  # (1, embed_dim)
-                
-                if self.hard_negatives and a_negatives is not None:
-                    # Combine positive answer with hard negatives for this question
-                    a_pos = a_embeddings[i:i+1]  # (1, embed_dim)
-                    a_negs = a_negatives[i]  # (num_negs, embed_dim)
-                    
-                    # Combine positive and negatives
-                    a_all = torch.cat([a_pos, a_negs], dim=0)  # (1+num_negs, embed_dim)
-                    
-                    # Calculate similarity between question and all answers
-                    sim = torch.matmul(q_embed, a_all.T) / self.temperature  # (1, 1+num_negs)
-                    
-                    # First answer is positive, rest are negative
-                    logits = sim.view(-1)  # (1+num_negs,)
-                    labels = torch.zeros(1, dtype=torch.long, device=q_embed.device)
-                    
-                    all_logits.append(logits)
-                    all_labels.append(labels)
-                else:
-                    # Without hard negatives, just use the positive pair
-                    # This becomes a binary classification task
-                    a_embed = a_embeddings[i:i+1]  # (1, embed_dim)
-                    sim = torch.matmul(q_embed, a_embed.T) / self.temperature  # (1, 1)
-                    
-                    # Sigmoid loss (binary classification)
-                    target = torch.ones_like(sim)
-                    loss_i = F.binary_cross_entropy_with_logits(sim, target)
-                    
-                    if i == 0:
-                        loss = loss_i
-                    else:
-                        loss += loss_i
-            
-            if self.hard_negatives and a_negatives is not None:
-                # Concatenate all logits and labels
-                all_logits = torch.cat(all_logits, dim=0)
-                all_labels = torch.cat(all_labels, dim=0)
-                
-                # Cross entropy loss
-                loss = F.cross_entropy(all_logits, all_labels)
-                
-                # Calculate accuracy
-                preds = torch.argmax(all_logits.view(batch_size, -1), dim=1)
-                acc = (preds == 0).float().mean()  # 0 is the index of positive answer
-                
-                metrics = {
-                    'loss': loss.item(),
-                    'acc': acc.item()
-                }
-            else:
-                # Binary case
-                loss = loss / batch_size
-                metrics = {
-                    'loss': loss.item(),
-                    'acc': 0.5  # Placeholder, no meaningful accuracy for binary case
-                }
+        # Calculate similarity matrix
+        similarity = torch.matmul(q_embeddings, a_embeddings.T) / self.temperature
+        
+        # Labels are on the diagonal (each question matched with its answer)
+        labels = torch.arange(batch_size, device=q_embeddings.device)
+        
+        # Compute loss (bidirectional)
+        loss_q2a = F.cross_entropy(similarity, labels)
+        loss_a2q = F.cross_entropy(similarity.T, labels)
+        loss = (loss_q2a + loss_a2q) / 2
+        
+        # Calculate accuracy metrics
+        q2a_preds = torch.argmax(similarity, dim=1)
+        a2q_preds = torch.argmax(similarity.T, dim=1)
+        q2a_acc = (q2a_preds == labels).float().mean()
+        a2q_acc = (a2q_preds == labels).float().mean()
+        
+        metrics = {
+            'loss': loss.item(),
+            'q2a_acc': q2a_acc.item(),
+            'a2q_acc': a2q_acc.item(),
+            'avg_acc': (q2a_acc.item() + a2q_acc.item()) / 2
+        }
         
         return loss, metrics
 
 
-class MSELoss(BaseLoss):
-    """MSE loss on normalized upvote scores"""
+class RankInfoNCELoss(BaseLoss):
+    """
+    InfoNCE loss that leverages rank or score information from the dataset.
+    Works with standard batch format or multiple positives format.
     
-    def __init__(self, normalize=True):
-        super(MSELoss, self).__init__()
-        self.normalize = normalize
-        self.mse = nn.MSELoss()
-        self.name = f"mse_norm{int(normalize)}"
-        
-    def forward(self, q_embeddings, a_embeddings, upvote_scores=None, **kwargs):
+    Can use either:
+    - Ordinal ranks (position in the ranked list, 0 is best)
+    - Cardinal scores (actual score values, higher is better)
+    """
+    
+    def __init__(self, temperature=0.1, use_ranks=True, use_scores=False, 
+                 rank_weight=0.1, score_weight=0.01):
         """
-        Calculate MSE loss between similarity and normalized upvote scores
+        Initialize the loss function.
+        
+        Args:
+            temperature: Temperature parameter for scaling similarity scores
+            use_ranks: Whether to use ordinal rank information in loss calculation
+            use_scores: Whether to use cardinal score information in loss calculation
+            rank_weight: Weight for rank-based penalties (higher ranks get lower weight)
+            score_weight: Weight for score-based adjustments (higher scores get higher weight)
+        """
+        super().__init__()
+        self.temperature = temperature
+        self.use_ranks = use_ranks
+        self.use_scores = use_scores
+        self.rank_weight = rank_weight
+        self.score_weight = score_weight
+        
+        # Create descriptive name
+        ranking_method = []
+        if use_ranks:
+            ranking_method.append(f"rank{rank_weight}")
+        if use_scores:
+            ranking_method.append(f"score{score_weight}")
+        
+        ranking_str = "_".join(ranking_method) if ranking_method else "standard"
+        self.name = f"infonce_{ranking_str}_t{temperature}"
+        
+    def forward(self, q_embeddings, a_embeddings, question_ids=None, ranks=None, scores=None, **kwargs):
+        """
+        Calculate InfoNCE loss with rank/score-based weighting
         
         Args:
             q_embeddings: Question embeddings (batch_size, embed_dim)
             a_embeddings: Answer embeddings (batch_size, embed_dim)
-            upvote_scores: Upvote scores for each answer (batch_size,)
-        
+            question_ids: Question IDs to identify answers to the same question
+            ranks: Ordinal rank of each answer (0 is highest ranked)
+            scores: Cardinal score of each answer (higher is better)
+            
         Returns:
-            loss: Loss value
-            metrics: Dictionary with metrics
+            loss: Weighted InfoNCE loss
+            metrics: Dictionary with accuracy and other metrics
         """
-        if upvote_scores is None:
-            raise ValueError("MSELoss requires upvote_scores")
-            
-        # Calculate similarity between paired questions and answers
-        similarity = torch.sum(q_embeddings * a_embeddings, dim=1)  # (batch_size,)
+        batch_size = q_embeddings.shape[0]
+        device = q_embeddings.device
         
-        # Normalize similarity to [0, 1] range
-        if self.normalize:
-            similarity = (similarity + 1) / 2
-            
-        # Normalize upvote scores
-        if self.normalize:
-            upvote_scores = upvote_scores / torch.max(upvote_scores)
-            
-        # Calculate MSE loss
-        loss = self.mse(similarity, upvote_scores)
+        # Calculate similarity matrix
+        similarity = torch.matmul(q_embeddings, a_embeddings.T) / self.temperature
         
-        # Calculate correlation for tracking
-        sim_np = similarity.detach().cpu().numpy()
-        score_np = upvote_scores.detach().cpu().numpy()
-        correlation = np.corrcoef(sim_np, score_np)[0, 1]
+        # Standard InfoNCE loss labels
+        labels = torch.arange(batch_size, device=device)
+        
+        # Track whether we've applied any adjustments
+        adjusted = False
+        sim_weights = torch.ones_like(similarity)
+        
+        # Group answers by question if needed for adjustments
+        if (self.use_ranks or self.use_scores) and question_ids is not None:
+            question_groups = defaultdict(list)
+            for i, q_id in enumerate(question_ids):
+                item = [i]  # Always include index
+                
+                if self.use_ranks and ranks is not None:
+                    item.append(ranks[i].item())  # Add rank
+                else:
+                    item.append(None)  # Placeholder
+                    
+                if self.use_scores and scores is not None:
+                    item.append(scores[i].item())  # Add score
+                else:
+                    item.append(None)  # Placeholder
+                    
+                question_groups[q_id].append(item)
+                
+            # Apply adjustments for questions with multiple answers
+            for q_id, items in question_groups.items():
+                if len(items) <= 1:
+                    continue  # Skip questions with only one answer
+                
+                # Apply rank-based adjustments
+                if self.use_ranks and ranks is not None:
+                    adjusted = True
+                    for i, item1 in enumerate(items):
+                        idx1, rank1, _ = item1
+                        for j, item2 in enumerate(items):
+                            if i == j:
+                                continue  # Skip self
+                                
+                            idx2, rank2, _ = item2
+                            # Apply penalty based on rank
+                            # Higher ranks (worse answers) get lower weight
+                            if rank2 is not None:
+                                rank_penalty = 1.0 - self.rank_weight * rank2
+                                sim_weights[idx1, idx2] *= rank_penalty
+                
+                # Apply score-based adjustments
+                if self.use_scores and scores is not None:
+                    adjusted = True
+                    
+                    # Find max score for this question (for normalization)
+                    max_score = max(item[2] for item in items if item[2] is not None)
+                    if max_score <= 0:
+                        continue  # Skip if no positive scores
+                        
+                    for i, item1 in enumerate(items):
+                        idx1, _, score1 = item1
+                        for j, item2 in enumerate(items):
+                            if i == j:
+                                continue  # Skip self
+                                
+                            idx2, _, score2 = item2
+                            # Apply weight based on normalized score
+                            # Higher scores get higher weight
+                            if score2 is not None and max_score > 0:
+                                normalized_score = score2 / max_score
+                                score_weight = 1.0 + self.score_weight * normalized_score
+                                sim_weights[idx1, idx2] *= score_weight
+        
+        # Compute loss
+        if adjusted:
+            # Apply weights to similarity
+            adjusted_similarity = similarity * sim_weights
+            
+            # Compute loss with adjusted similarity
+            loss_q2a = F.cross_entropy(adjusted_similarity, labels)
+            loss_a2q = F.cross_entropy(adjusted_similarity.T, labels)
+            loss = (loss_q2a + loss_a2q) / 2
+        else:
+            # Standard InfoNCE without adjustments
+            loss_q2a = F.cross_entropy(similarity, labels)
+            loss_a2q = F.cross_entropy(similarity.T, labels)
+            loss = (loss_q2a + loss_a2q) / 2
+        
+        # Calculate accuracy metrics
+        q2a_preds = torch.argmax(similarity, dim=1)
+        a2q_preds = torch.argmax(similarity.T, dim=1)
+        q2a_acc = (q2a_preds == labels).float().mean()
+        a2q_acc = (a2q_preds == labels).float().mean()
         
         metrics = {
             'loss': loss.item(),
-            'correlation': correlation
+            'q2a_acc': q2a_acc.item(),
+            'a2q_acc': a2q_acc.item(),
+            'avg_acc': (q2a_acc.item() + a2q_acc.item()) / 2,
+            'used_adjustment': adjusted
+        }
+        
+        return loss, metrics
+
+
+class HardNegativeInfoNCELoss(BaseLoss):
+    """
+    InfoNCE loss with additional penalty for hard negatives.
+    Works with both standard batches and hard negative batches.
+    """
+    
+    def __init__(self, temperature=0.1, hard_negative_weight=1.0):
+        """
+        Initialize the loss function.
+        
+        Args:
+            temperature: Temperature parameter for scaling similarity scores
+            hard_negative_weight: Weight for the hard negative component of the loss
+        """
+        super().__init__()
+        self.temperature = temperature
+        self.hard_negative_weight = hard_negative_weight
+        self.name = f"hard_neg_infonce_t{temperature}_w{hard_negative_weight}"
+        
+    def forward(self, q_embeddings, a_embeddings, question_ids=None, **kwargs):
+        """
+        Calculate InfoNCE loss with hard negative penalty
+        
+        Args:
+            q_embeddings: Question embeddings (batch_size, embed_dim)
+            a_embeddings: Answer embeddings (batch_size, embed_dim)
+            question_ids: Question IDs to identify hard negatives
+            
+        Returns:
+            loss: Combined InfoNCE loss with hard negative penalty
+            metrics: Dictionary with accuracy and hard negative metrics
+        """
+        batch_size = q_embeddings.shape[0]
+        device = q_embeddings.device
+        
+        # Standard InfoNCE loss with in-batch negatives
+        similarity = torch.matmul(q_embeddings, a_embeddings.T) / self.temperature
+        labels = torch.arange(batch_size, device=device)
+        base_loss = F.cross_entropy(similarity, labels)
+        
+        # Additional penalty for hard negatives (answers to the same question)
+        hard_negative_loss = torch.tensor(0.0, device=device)
+        hard_neg_count = 0
+        
+        if question_ids is not None:
+            # Group by question ID
+            question_groups = defaultdict(list)
+            for i, q_id in enumerate(question_ids):
+                question_groups[q_id].append(i)
+            
+            # Calculate hard negative loss
+            for q_id, indices in question_groups.items():
+                if len(indices) <= 1:
+                    continue  # Skip questions with only one answer
+                
+                # For each pair of answers to the same question
+                for i, idx1 in enumerate(indices):
+                    for j, idx2 in enumerate(indices):
+                        if i != j:  # Different answers to same question
+                            # Penalize high similarity between different answers to same question
+                            sim = similarity[idx1, idx2]
+                            hard_negative_loss += torch.exp(sim)
+                            hard_neg_count += 1
+        
+        # Add weighted hard negative loss if found
+        total_loss = base_loss
+        if hard_neg_count > 0:
+            hard_negative_loss = hard_negative_loss / hard_neg_count
+            total_loss += self.hard_negative_weight * hard_negative_loss
+        
+        # Calculate metrics
+        preds = torch.argmax(similarity, dim=1)
+        accuracy = (preds == labels).float().mean()
+        
+        metrics = {
+            'loss': total_loss.item(),
+            'base_loss': base_loss.item(),
+            'hard_neg_loss': hard_negative_loss.item() if isinstance(hard_negative_loss, torch.Tensor) else 0,
+            'accuracy': accuracy.item(),
+            'hard_neg_count': hard_neg_count
+        }
+        
+        return total_loss, metrics
+
+
+class MultiplePositivesLoss(BaseLoss):
+    """
+    Loss function that handles multiple positive answers per question.
+    Works with the multiple_positives batch transform.
+    """
+    
+    def __init__(self, temperature=0.1, rank_weight=0.1):
+        """
+        Initialize the loss function.
+        
+        Args:
+            temperature: Temperature parameter for scaling similarity scores
+            rank_weight: Weight for rank-based penalties (higher ranks get lower weight)
+        """
+        super().__init__()
+        self.temperature = temperature
+        self.rank_weight = rank_weight
+        self.name = f"multi_pos_t{temperature}_w{rank_weight}"
+        
+    def forward(self, q_embeddings, a_embeddings, question_ids, ranks=None, **kwargs):
+        """
+        Calculate loss with multiple positives per question
+        
+        Args:
+            q_embeddings: Question embeddings (batch_size, embed_dim)
+            a_embeddings: Answer embeddings (batch_size, embed_dim)
+            question_ids: Question IDs to identify answers to the same question
+            ranks: Rank of each answer (optional)
+            
+        Returns:
+            loss: Combined loss accounting for multiple positives
+            metrics: Dictionary with accuracy and other metrics
+        """
+        batch_size = q_embeddings.shape[0]
+        device = q_embeddings.device
+        
+        # Calculate similarity matrix
+        similarity = torch.matmul(q_embeddings, a_embeddings.T) / self.temperature
+        
+        # Group by question ID
+        question_groups = defaultdict(list)
+        for i, q_id in enumerate(question_ids):
+            question_groups[q_id].append(i)
+        
+        # Calculate loss
+        total_loss = torch.tensor(0.0, device=device)
+        correct_count = 0
+        total_count = 0
+        
+        # For each question
+        for q_id, indices in question_groups.items():
+            if len(indices) <= 0:
+                continue
+                
+            for i, idx in enumerate(indices):
+                # Get query embedding
+                q_embed = q_embeddings[idx]
+                
+                # Calculate similarity to all answers
+                sims = torch.matmul(q_embed.unsqueeze(0), a_embeddings.T).squeeze(0)
+                
+                # Create mask for positive samples (answers to same question)
+                pos_mask = torch.zeros(batch_size, device=device)
+                for pos_idx in indices:
+                    weight = 1.0
+                    # Apply rank weighting if available
+                    if ranks is not None:
+                        # Higher ranked answers get higher weight
+                        weight = 1.0 - self.rank_weight * ranks[pos_idx].item()
+                    pos_mask[pos_idx] = weight
+                
+                # Create masked loss - encourage high similarity with positives
+                neg_mask = 1.0 - (pos_mask > 0).float()
+                
+                # Compute InfoNCE-style loss for this query
+                numerator = torch.sum(pos_mask * torch.exp(sims))
+                denominator = torch.sum(torch.exp(sims))
+                loss_i = -torch.log(numerator / denominator + 1e-8)
+                total_loss += loss_i
+                
+                # Calculate accuracy
+                pred = torch.argmax(sims).item()
+                if pos_mask[pred] > 0:
+                    correct_count += 1
+                total_count += 1
+        
+        # Average loss
+        loss = total_loss / total_count if total_count > 0 else torch.tensor(0.0, device=device)
+        
+        # Calculate accuracy
+        accuracy = correct_count / total_count if total_count > 0 else 0.0
+        
+        metrics = {
+            'loss': loss.item(),
+            'accuracy': accuracy,
+            'total_samples': total_count
         }
         
         return loss, metrics
 
 
 class TripletLoss(BaseLoss):
-    """Triplet loss with upvote-based selection of positives and negatives"""
+    """
+    Triplet loss for query-positive-negative triplets.
+    Works with the triplet batch transform.
+    """
     
-    def __init__(self, margin=0.2):
-        super(TripletLoss, self).__init__()
+    def __init__(self, margin=0.3):
+        """
+        Initialize the triplet loss.
+        
+        Args:
+            margin: Margin between positive and negative similarities
+        """
+        super().__init__()
         self.margin = margin
         self.name = f"triplet_m{margin}"
         
@@ -221,16 +462,16 @@ class TripletLoss(BaseLoss):
             q_embeddings: Question embeddings (batch_size, embed_dim)
             a_pos_embeddings: Positive answer embeddings (batch_size, embed_dim)
             a_neg_embeddings: Negative answer embeddings (batch_size, embed_dim)
-        
+            
         Returns:
-            loss: Loss value
-            metrics: Dictionary with metrics
+            loss: Triplet loss
+            metrics: Dictionary with accuracy and similarity metrics
         """
-        # Calculate similarity between questions and answers
-        pos_sim = torch.sum(q_embeddings * a_pos_embeddings, dim=1)  # (batch_size,)
-        neg_sim = torch.sum(q_embeddings * a_neg_embeddings, dim=1)  # (batch_size,)
+        # Calculate similarity between queries and answers
+        pos_sim = torch.sum(q_embeddings * a_pos_embeddings, dim=1)
+        neg_sim = torch.sum(q_embeddings * a_neg_embeddings, dim=1)
         
-        # Calculate triplet loss: sim(q, a_neg) - sim(q, a_pos) + margin
+        # Calculate triplet loss: enforce margin between pos_sim and neg_sim
         losses = F.relu(neg_sim - pos_sim + self.margin)
         loss = torch.mean(losses)
         
@@ -241,254 +482,184 @@ class TripletLoss(BaseLoss):
             'loss': loss.item(),
             'acc': acc.item(),
             'avg_pos_sim': pos_sim.mean().item(),
-            'avg_neg_sim': neg_sim.mean().item()
+            'avg_neg_sim': neg_sim.mean().item(),
+            'margin_violations': (losses > 0).float().mean().item()
         }
         
         return loss, metrics
 
 
 class ListwiseRankingLoss(BaseLoss):
-    """Listwise ranking loss for learning to rank answers"""
+    """
+    Listwise ranking loss for learning to rank multiple answers.
+    Works with the listwise batch transform.
+    """
     
-    def __init__(self, in_batch_negatives=True, temperature=1.0):
-        super(ListwiseRankingLoss, self).__init__()
-        self.in_batch_negatives = in_batch_negatives
-        self.temperature = temperature
-        self.name = f"listwise_ibn{int(in_batch_negatives)}_t{temperature}"
+    def __init__(self, temperature=1.0):
+        """
+        Initialize the listwise ranking loss.
         
-    def forward(self, q_embeddings, a_embeddings, upvote_scores=None, 
-                a_list_embeddings=None, a_list_scores=None, **kwargs):
+        Args:
+            temperature: Temperature for scaling similarities
+        """
+        super().__init__()
+        self.temperature = temperature
+        self.name = f"listwise_t{temperature}"
+        
+    def forward(self, q_embeddings, a_list_embeddings, a_list_scores, **kwargs):
         """
         Calculate listwise ranking loss
         
         Args:
             q_embeddings: Question embeddings (batch_size, embed_dim)
-            a_embeddings: Answer embeddings (batch_size, embed_dim)
-            upvote_scores: Upvote scores for answers (batch_size,)
-            a_list_embeddings: List of answer embeddings per question [(num_answers, embed_dim), ...]
-            a_list_scores: List of scores for answers per question [(num_answers,), ...]
-        
+                          or list of embeddings, one per question
+            a_list_embeddings: List of answer embeddings tensors
+                              [(num_answers, embed_dim), ...]
+            a_list_scores: List of scores for each answer per question
+                          [(num_answers,), ...]
+            
         Returns:
-            loss: Loss value
-            metrics: Dictionary with metrics
+            loss: Listwise ranking loss
+            metrics: Dictionary with NDCG and other metrics
         """
-        batch_size = q_embeddings.shape[0]
+        # Determine if we're using a device (for GPU support)
+        if isinstance(q_embeddings, list):
+            device = q_embeddings[0].device if q_embeddings else torch.device('cpu')
+        else:
+            device = q_embeddings.device
+            
+        total_loss = torch.tensor(0.0, device=device)
+        total_ndcg = 0.0
         
-        if self.in_batch_negatives:
-            # With in-batch negatives: compute full similarity matrix
-            # and compare with ranking from upvote scores
+        # Check if we have a batch or individual questions
+        if isinstance(q_embeddings, list):
+            q_embeds = q_embeddings
+        else:
+            # Assume we have a batch with one embedding per question
+            q_embeds = [q_embeddings[i].unsqueeze(0) for i in range(q_embeddings.shape[0])]
+        
+        # Make sure all lists have the same length
+        min_length = min(len(q_embeds), len(a_list_embeddings), len(a_list_scores))
+        
+        # Process each question separately
+        for i in range(min_length):
+            q_embed = q_embeds[i]
+            answers_embed = a_list_embeddings[i]
+            scores = a_list_scores[i]
             
-            if upvote_scores is None:
-                raise ValueError("ListwiseRankingLoss with in-batch negatives requires upvote_scores")
+            # Calculate similarity between question and all answers
+            sim = torch.matmul(q_embed, answers_embed.T).squeeze(0)  # (num_answers,)
+            sim = sim / self.temperature
             
-            # Compute similarity matrix
-            similarity = torch.matmul(q_embeddings, a_embeddings.T)  # (batch_size, batch_size)
+            # Convert to probabilities
+            sim_probs = F.softmax(sim, dim=0)  # (num_answers,)
             
-            # Scale similarity by temperature
-            similarity = similarity / self.temperature
-            
-            # Convert to softmax probabilities
-            sim_probs = F.softmax(similarity, dim=1)  # (batch_size, batch_size)
-            
-            # Create target probabilities from normalized upvote scores
-            target_probs = F.softmax(upvote_scores.view(1, -1) / self.temperature, dim=1)
-            target_probs = target_probs.repeat(batch_size, 1)  # (batch_size, batch_size)
-            
-            # Create mask to set target probs to 0 for answers to other questions
-            mask = torch.eye(batch_size, device=q_embeddings.device)
-            masked_target_probs = target_probs * mask
-            
-            # Renormalize masked target probs
-            row_sums = masked_target_probs.sum(dim=1, keepdim=True)
-            masked_target_probs = masked_target_probs / (row_sums + 1e-8)
+            # Create target probabilities from normalized scores
+            target_probs = F.softmax(scores / self.temperature, dim=0)  # (num_answers,)
             
             # KL divergence loss
-            loss = F.kl_div(torch.log(sim_probs + 1e-8), masked_target_probs, reduction='batchmean')
+            loss_i = F.kl_div(torch.log(sim_probs + 1e-8), target_probs, reduction='sum')
+            total_loss += loss_i
             
-            # Calculate ranking metrics
-            metrics = {
-                'loss': loss.item()
-            }
+            # Calculate NDCG
+            # Sort predicted and target rankings
+            _, pred_indices = torch.sort(sim, descending=True)
+            _, ideal_indices = torch.sort(scores, descending=True)
             
-        else:
-            # Without in-batch negatives: compare each question with its list of answers
+            # Calculate DCG
+            pred_dcg = self._calculate_dcg(pred_indices, scores)
+            ideal_dcg = self._calculate_dcg(ideal_indices, scores)
             
-            if a_list_embeddings is None or a_list_scores is None:
-                raise ValueError("ListwiseRankingLoss without in-batch negatives requires answer lists")
-            
-            total_loss = 0.0
-            total_ndcg = 0.0
-            
-            # Process each question separately
-            for i in range(batch_size):
-                q_embed = q_embeddings[i:i+1]  # (1, embed_dim)
-                a_list = a_list_embeddings[i]  # (num_answers, embed_dim)
-                
-                # Calculate similarity between question and all answers
-                sim = torch.matmul(q_embed, a_list.T).squeeze(0)  # (num_answers,)
-                sim = sim / self.temperature
-                
-                # Convert to probabilities
-                sim_probs = F.softmax(sim, dim=0)  # (num_answers,)
-                
-                # Create target probabilities from normalized scores
-                scores = a_list_scores[i]  # (num_answers,)
-                target_probs = F.softmax(scores / self.temperature, dim=0)  # (num_answers,)
-                
-                # KL divergence loss
-                loss_i = F.kl_div(torch.log(sim_probs + 1e-8), target_probs, reduction='sum')
-                total_loss += loss_i
-                
-                # Calculate NDCG
-                # Sort predicted and target rankings
-                _, pred_indices = torch.sort(sim, descending=True)
-                _, ideal_indices = torch.sort(scores, descending=True)
-                
-                # Calculate DCG
-                pred_dcg = self._calculate_dcg(pred_indices, scores)
-                ideal_dcg = self._calculate_dcg(ideal_indices, scores)
-                
-                # Calculate NDCG
-                ndcg = pred_dcg / (ideal_dcg + 1e-8)
-                total_ndcg += ndcg
-                
-            # Average loss and metrics
-            loss = total_loss / batch_size
-            avg_ndcg = total_ndcg / batch_size
-            
-            metrics = {
-                'loss': loss.item(),
-                'ndcg': avg_ndcg.item()
-            }
-            
+            # Calculate NDCG
+            ndcg = pred_dcg / (ideal_dcg + 1e-8)
+            total_ndcg += ndcg
+        
+        # Average loss and metrics
+        batch_size = min_length
+        loss = total_loss / batch_size if batch_size > 0 else total_loss
+        avg_ndcg = total_ndcg / batch_size if batch_size > 0 else 0.0
+        
+        metrics = {
+            'loss': loss.item(),
+            'ndcg': avg_ndcg
+        }
+        
         return loss, metrics
     
     def _calculate_dcg(self, indices, scores):
         """Helper function to calculate DCG"""
-        ranks = torch.arange(1, len(indices) + 1, dtype=torch.float, device=indices.device)
+        device = indices.device
+        ranks = torch.arange(1, len(indices) + 1, dtype=torch.float, device=device)
         gain = scores[indices]
         return torch.sum(gain / torch.log2(ranks + 1))
 
-
-# Factory function to create loss based on name
-class EnhancedInfoNCELoss(BaseLoss):
-    """InfoNCE loss with extra penalty for hard negatives (answers to same question)"""
+# Factory function to create a loss by name
+def create_flexible_loss(loss_name, **kwargs):
+    """
+    Factory function to create a loss by name
     
-    def __init__(self, temperature=0.1, hard_negative_weight=2.0):
-        super(EnhancedInfoNCELoss, self).__init__()
-        self.temperature = temperature
-        self.hard_negative_weight = hard_negative_weight
-        self.name = f"enhanced_infonce_t{temperature}_hnw{hard_negative_weight}"
+    Args:
+        loss_name: Name of the loss function
+        **kwargs: Additional parameters for the loss
         
-    def forward(self, q_embeddings, a_embeddings, question_ids=None, **kwargs):
-        """
-        Calculate InfoNCE loss with extra penalty for hard negatives
+    Returns:
+        Loss function instance
         
-        Args:
-            q_embeddings: Question embeddings (batch_size, embed_dim)
-            a_embeddings: Answer embeddings (batch_size, embed_dim)
-            question_ids: Question IDs for identifying hard negatives
-            
-        Returns:
-            loss: Loss value
-            metrics: Dictionary with accuracy and hard negative metrics
-        """
-        batch_size = q_embeddings.shape[0]
-        device = q_embeddings.device
-        
-        # Calculate similarity matrix
-        similarity = torch.matmul(q_embeddings, a_embeddings.T)
-        
-        # Scale by temperature
-        logits = similarity / self.temperature
-        
-        # Standard InfoNCE loss - use diagonal as positive examples
-        labels = torch.arange(batch_size, device=device)
-        infonce_loss = F.cross_entropy(logits, labels)
-        
-        # Calculate accuracy: whether correct answer has highest similarity
-        predictions = torch.argmax(similarity, dim=1)
-        accuracy = (predictions == labels).float().mean().item()
-        
-        # Initialize metrics
-        metrics = {
-            'base_loss': infonce_loss.item(),
-            'acc': accuracy,
-            'hard_neg_loss': 0.0
-        }
-        
-        # Add extra penalty for hard negatives if question IDs are provided
-        if question_ids is not None:
-            # Group query indices by question ID
-            question_groups = defaultdict(list)
-            for i, q_id in enumerate(question_ids):
-                # Handle different question ID formats
-                if isinstance(q_id, torch.Tensor):
-                    q_id = q_id.item()
-                elif hasattr(q_id, 'decode'):
-                    q_id = q_id.decode()
-                    
-                question_groups[q_id].append(i)
-            
-            # Calculate hard negative loss for questions with multiple answers
-            questions_with_hard_negatives = 0
-            hard_negative_pairs = 0
-            hard_negative_loss = 0.0
-            
-            for q_id, indices in question_groups.items():
-                if len(indices) <= 1:
-                    continue
-                    
-                questions_with_hard_negatives += 1
-                
-                # For each query in this group
-                for idx in indices:
-                    # Get similarities between this query and other answers to the same question
-                    other_indices = [j for j in indices if j != idx]
-                    hard_negative_pairs += len(other_indices)
-                    
-                    # Skip if no other answers 
-                    if not other_indices:
-                        continue
-                        
-                    # Calculate similarity to hard negatives
-                    hard_neg_sim = similarity[idx, other_indices]
-                    
-                    # Add penalty (we want to minimize similarity to hard negatives)
-                    hard_negative_loss += torch.mean(hard_neg_sim)
-            
-            # Only add to loss if we found hard negatives
-            if hard_negative_pairs > 0:
-                # Scale the hard negative loss
-                scaled_hard_negative_loss = (hard_negative_loss / hard_negative_pairs) * self.hard_negative_weight
-                total_loss = infonce_loss + scaled_hard_negative_loss
-                
-                metrics['hard_neg_loss'] = scaled_hard_negative_loss.item()
-                metrics['hard_neg_count'] = hard_negative_pairs
-                metrics['questions_with_hard_negs'] = questions_with_hard_negatives
-            else:
-                total_loss = infonce_loss
-        else:
-            total_loss = infonce_loss
-            
-        metrics['loss'] = total_loss.item()
-        return total_loss, metrics
-
-
-def create_loss(loss_name, **kwargs):
-    """Factory function for creating loss functions"""
+    Raises:
+        ValueError: If the loss name is not recognized
+    """
+    # Basic loss functions
     losses = {
-        "infonce": InfoNCELoss,
-        "infonce_no_batch_neg": lambda **kw: InfoNCELoss(in_batch_negatives=False, **kw),
-        "infonce_no_hard_neg": lambda **kw: InfoNCELoss(hard_negatives=False, **kw),
-        "mse": MSELoss,
-        "triplet": TripletLoss,
-        "listwise": ListwiseRankingLoss,
-        "listwise_no_batch_neg": lambda **kw: ListwiseRankingLoss(in_batch_negatives=False, **kw),
-        "enhanced_infonce": EnhancedInfoNCELoss
+        'infonce': StandardInfoNCELoss,
+        'rank_infonce': RankInfoNCELoss,
+        'hard_negative': HardNegativeInfoNCELoss,
+        'multiple_positives': MultiplePositivesLoss,
+        'triplet': TripletLoss,
+        'listwise': ListwiseRankingLoss
     }
     
+    # Handle specialized versions of InfoNCE
+    if loss_name.startswith('infonce_'):
+        # Parse options from name
+        options = loss_name.split('_')[1:]
+        
+        # Default parameters
+        params = {
+            'temperature': kwargs.get('temperature', 0.1),
+            'use_ranks': False,
+            'use_scores': False,
+            'rank_weight': 0.1,
+            'score_weight': 0.01
+        }
+        
+        # Update based on options
+        for option in options:
+            if option.startswith('rank'):
+                params['use_ranks'] = True
+                try:
+                    params['rank_weight'] = float(option[4:])
+                except (ValueError, IndexError):
+                    pass
+            elif option.startswith('score'):
+                params['use_scores'] = True
+                try:
+                    params['score_weight'] = float(option[5:])
+                except (ValueError, IndexError):
+                    pass
+            elif option.startswith('t'):
+                try:
+                    params['temperature'] = float(option[1:])
+                except (ValueError, IndexError):
+                    pass
+        
+        # Update with provided kwargs (override parsed values)
+        params.update(kwargs)
+        
+        # Create RankInfoNCE with parsed parameters
+        return RankInfoNCELoss(**params)
+    
+    # For standard loss names
     if loss_name not in losses:
-        raise ValueError(f"Unknown loss function: {loss_name}")
+        raise ValueError(f"Unknown loss function: {loss_name}. Available losses: {list(losses.keys())}")
     
     return losses[loss_name](**kwargs)

@@ -35,7 +35,7 @@ class ExperimentConfig(BaseModel):
     projection_dim: int = Field(default=128, description="Dimension for embeddings projection")
     
     # Training settings
-    batch_size: int = Field(default=16, description="Training batch size")
+    batch_size: int = Field(default=64, description="Training batch size")
     epochs: int = Field(default=5, description="Number of training epochs")
     learning_rate: float = Field(default=2e-5, description="Learning rate")
     checkpoint_interval: int = Field(default=1, description="Save checkpoint every N epochs")

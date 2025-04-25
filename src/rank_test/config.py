@@ -1,220 +1,263 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-"""Configuration module for experiments"""
+"""
+Configuration module using Pydantic for strongly typed configuration.
+Provides a simple, flat structure for experiment configuration.
+"""
 
-import os
-import yaml
+from typing import Dict, Any, Optional, Union, Literal
+from pathlib import Path
 import json
+from pydantic import BaseModel, Field
 
-class ExperimentConfig:
-    """Configuration class for experiments"""
+# Type definitions using literals instead of enums
+DatasetStrategyType = Literal["standard", "flexible"]
+BatchTransformType = Literal["infonce", "multiple_positives", "hard_negative", "triplet", "listwise"]
+NegativeStrategyType = Literal["hard_negative", "in_batch", "mixed"]
+LossType = Literal["infonce", "rank_infonce", "hard_negative", "multiple_positives", "triplet", "listwise", "mse"]
+
+
+class ExperimentConfig(BaseModel):
+    """Complete experiment configuration with flat structure"""
+    # Experiment metadata
+    name: Optional[str] = Field(default=None, description="Name of the experiment")
     
-    def __init__(self, **kwargs):
-        """
-        Initialize experiment configuration
-        
-        Args:
-            **kwargs: Configuration parameters
-        """
-        # Default configuration
-        self.config = {
-            # Data settings
-            'data_path': 'data/ranked_qa.json',
-            'limit': None,
-            'test_size': 0.2,
-            'seed': 42,
+    # Data settings
+    data_path: str = Field(default="data/ranked_qa.json", description="Path to the dataset JSON file")
+    limit: Optional[int] = Field(default=None, description="Limit the number of samples to process")
+    test_size: float = Field(default=0.2, description="Proportion of data to use for testing")
+    seed: int = Field(default=42, description="Random seed for reproducibility")
+    force_regenerate: bool = Field(default=False, description="Force dataset regeneration")
+    
+    # Model settings
+    embed_dim: int = Field(default=768, description="Embedding dimension from BERT")
+    projection_dim: int = Field(default=128, description="Dimension for embeddings projection")
+    
+    # Training settings
+    batch_size: int = Field(default=64, description="Training batch size")
+    epochs: int = Field(default=5, description="Number of training epochs")
+    learning_rate: float = Field(default=2e-5, description="Learning rate")
+    checkpoint_interval: int = Field(default=1, description="Save checkpoint every N epochs")
+    eval_steps: Optional[int] = Field(default=None, description="Evaluate every N steps")
+    eval_at_zero: bool = Field(default=False, description="Evaluate before training")
+    debug: bool = Field(default=False, description="Debug mode with minimal data")
+    
+    # Output settings
+    output_dir: str = Field(default="models", description="Directory to save models and results")
+    log_to_wandb: bool = Field(default=True, description="Whether to log metrics to W&B")
+    wandb_project: str = Field(default="qa-embeddings-comparison", description="W&B project name")
+    use_fixed_evaluation: bool = Field(default=True, description="Use the fixed evaluation implementation")
+    
+    # Dataset strategy settings
+    dataset_strategy: DatasetStrategyType = Field(default="standard", description="Dataset strategy to use")
+    batch_transform: BatchTransformType = Field(default="infonce", description="Batch transformation strategy")
+    
+    # InfoNCE transform options
+    take_top: bool = Field(default=True, description="For InfoNCE: use top-ranked answer (True) or random (False)")
+    
+    # Multiple positives options
+    pos_count: int = Field(default=3, description="For multiple_positives: number of positives per question")
+    
+    # Triplet options
+    neg_strategy: NegativeStrategyType = Field(default="hard_negative", description="For triplet: negative sampling strategy")
+    
+    # Listwise options
+    max_answers: int = Field(default=5, description="For listwise: maximum answers per question")
+    
+    # Loss settings
+    loss_type: LossType = Field(default="infonce", description="Loss function to use")
+    temperature: float = Field(default=0.1, description="Temperature for InfoNCE and listwise losses")
+    margin: float = Field(default=0.2, description="Margin for triplet loss")
+    normalize: bool = Field(default=True, description="For MSE: normalize scores")
+    
+    # Loss weighting options
+    use_ranks: bool = Field(default=True, description="Use ordinal ranks in loss calculation")
+    use_scores: bool = Field(default=False, description="Use cardinal scores in loss calculation")
+    rank_weight: float = Field(default=0.1, description="Weight for rank-based penalties")
+    score_weight: float = Field(default=0.05, description="Weight for score-based adjustments")
+    hard_negative_weight: float = Field(default=1.0, description="Weight for hard negative penalty")
+    
+    def auto_select_loss_type(cls, values):
+        """Automatically select loss type based on batch transform if not explicitly set"""
+        if 'loss_type' not in values or not values['loss_type']:
+            batch_transform = values.get('batch_transform')
+            if batch_transform:
+                if batch_transform == "infonce":
+                    values['loss_type'] = "infonce"
+                elif batch_transform == "multiple_positives":
+                    values['loss_type'] = "rank_infonce"
+                elif batch_transform == "hard_negative":
+                    values['loss_type'] = "hard_negative"
+                elif batch_transform == "triplet":
+                    values['loss_type'] = "triplet"
+                elif batch_transform == "listwise":
+                    values['loss_type'] = "listwise"
+        return values
+    
+    def validate_debug_settings(cls, values):
+        """Reduce settings in debug mode"""
+        if values.get('debug', False):
+            # Reduce batch size and epochs in debug mode
+            values['batch_size'] = min(values.get('batch_size', 16), 4)
+            values['epochs'] = min(values.get('epochs', 5), 2)
             
-            # Model settings
-            'embed_dim': 768,
-            'projection_dim': 128,
+            # Limit data
+            if values.get('limit') is None or values.get('limit', 0) > 50:
+                values['limit'] = 50
+                
+        return values
+    
+    def get_loss_kwargs(self) -> Dict[str, Any]:
+        """Get keyword arguments for the loss function"""
+        kwargs = {}
+        
+        loss_type = self.loss_type
+        
+        # Add loss-specific parameters
+        if loss_type in ["infonce", "rank_infonce", "hard_negative", "listwise"]:
+            kwargs['temperature'] = self.temperature
             
-            # Training settings
-            'batch_size': 16,
-            'epochs': 5,
-            'learning_rate': 2e-5,
-            'loss': 'infonce',
-            'loss_kwargs': {},
-            'checkpoint_interval': 1,
+        if loss_type == "rank_infonce":
+            kwargs['use_ranks'] = self.use_ranks
+            kwargs['use_scores'] = self.use_scores
+            kwargs['rank_weight'] = self.rank_weight
+            kwargs['score_weight'] = self.score_weight
             
-            # Output settings
-            'output_dir': 'models',
-            'log_to_wandb': True,
-            'wandb_project': 'qa-embeddings-comparison',
+        elif loss_type == "hard_negative":
+            kwargs['hard_negative_weight'] = self.hard_negative_weight
             
-            # Debug settings
-            'debug': False,
-        }
-        
-        # Update with provided arguments
-        self.config.update(kwargs)
-        
-        # Handle loss-specific settings
-        self._set_loss_defaults()
+        elif loss_type == "triplet":
+            kwargs['margin'] = self.margin
+            
+        elif loss_type == "mse":
+            kwargs['normalize'] = self.normalize
+            
+        return kwargs
     
-    def _set_loss_defaults(self):
-        """Set default loss parameters based on loss type"""
-        loss = self.config['loss']
-        loss_kwargs = self.config.get('loss_kwargs', {})
+    def get_batch_transform_kwargs(self) -> Dict[str, Any]:
+        """Get keyword arguments for the batch transformation function"""
+        kwargs = {}
         
-        # InfoNCE defaults
-        if loss.startswith('infonce'):
-            if 'temperature' not in loss_kwargs:
-                loss_kwargs['temperature'] = 0.1
-                
-            if loss == 'infonce_no_batch_neg':
-                loss_kwargs['in_batch_negatives'] = False
-                
-            if loss == 'infonce_no_hard_neg':
-                loss_kwargs['hard_negatives'] = False
+        transform = self.batch_transform
         
-        # Triplet loss defaults
-        elif loss == 'triplet':
-            if 'margin' not in loss_kwargs:
-                loss_kwargs['margin'] = 0.2
-        
-        # Listwise loss defaults
-        elif loss.startswith('listwise'):
-            if 'temperature' not in loss_kwargs:
-                loss_kwargs['temperature'] = 1.0
-                
-            if loss == 'listwise_no_batch_neg':
-                loss_kwargs['in_batch_negatives'] = False
-                
-            # Set answers per question for batched dataset
-            if 'answers_per_question' not in self.config:
-                self.config['answers_per_question'] = 5
-        
-        # MSE loss defaults
-        elif loss == 'mse':
-            if 'normalize' not in loss_kwargs:
-                loss_kwargs['normalize'] = True
-        
-        # Set loss kwargs
-        self.config['loss_kwargs'] = loss_kwargs
+        if transform == "infonce":
+            kwargs['take_top'] = self.take_top
+        elif transform == "multiple_positives":
+            kwargs['pos_count'] = self.pos_count
+        elif transform == "triplet":
+            kwargs['neg_strategy'] = self.neg_strategy
+        elif transform == "listwise":
+            kwargs['max_answers'] = self.max_answers
+            
+        return kwargs
     
-    def get(self, key, default=None):
-        """Get configuration parameter with optional default"""
-        return self.config.get(key, default)
+    def get_limit(self) -> Optional[int]:
+        """Get effective data limit, accounting for debug mode"""
+        if self.debug:
+            return min(self.limit or 50, 50)
+        return self.limit
     
-    def __getitem__(self, key):
-        """Dictionary-style access to configuration"""
-        return self.config[key]
+    def get_batch_size(self) -> int:
+        """Get effective batch size, accounting for debug mode"""
+        if self.debug:
+            return min(self.batch_size, 4)
+        return self.batch_size
     
-    def __setitem__(self, key, value):
-        """Dictionary-style setting of configuration"""
-        self.config[key] = value
-        
-        # If loss is set, update loss defaults
-        if key == 'loss':
-            self._set_loss_defaults()
-    
-    def save(self, path):
-        """Save configuration to file"""
-        directory = os.path.dirname(path)
-        if directory and not os.path.exists(directory):
-            os.makedirs(directory, exist_ok=True)
-        
-        # Save based on file extension
-        if path.endswith('.json'):
-            with open(path, 'w') as f:
-                json.dump(self.config, f, indent=2)
-        elif path.endswith('.yaml') or path.endswith('.yml'):
-            with open(path, 'w') as f:
-                yaml.dump(self.config, f, default_flow_style=False)
-        else:
-            raise ValueError(f"Unsupported file format: {path}")
+    def get_epochs(self) -> int:
+        """Get effective number of epochs, accounting for debug mode"""
+        if self.debug:
+            return min(self.epochs, 2)
+        return self.epochs
     
     @classmethod
-    def load(cls, path):
-        """Load configuration from file"""
-        if not os.path.exists(path):
-            raise FileNotFoundError(f"Configuration file not found: {path}")
-        
-        # Load based on file extension
-        if path.endswith('.json'):
-            with open(path, 'r') as f:
-                config = json.load(f)
-        elif path.endswith('.yaml') or path.endswith('.yml'):
-            with open(path, 'r') as f:
-                config = yaml.safe_load(f)
-        else:
-            raise ValueError(f"Unsupported file format: {path}")
-        
-        return cls(**config)
+    def from_file(cls, file_path: Union[str, Path]) -> 'ExperimentConfig':
+        """Load configuration from a JSON file"""
+        with open(file_path, 'r') as f:
+            config_data = json.load(f)
+        return cls.parse_obj(config_data)
     
-    def get_batch_size(self):
-        """Get batch size, with smaller size if in debug mode"""
-        if self.config.get('debug', False):
-            return min(self.config.get('batch_size', 16), 4)
-        return self.config.get('batch_size', 16)
-    
-    def get_limit(self):
-        """Get sample limit, with smaller limit if in debug mode"""
-        if self.config.get('debug', False):
-            return min(self.config.get('limit', 1000) or 1000, 50)
-        return self.config.get('limit')
-    
-    def get_epochs(self):
-        """Get epochs, with fewer epochs if in debug mode"""
-        if self.config.get('debug', False):
-            return min(self.config.get('epochs', 5), 2)
-        return self.config.get('epochs', 5)
-    
-    def as_dict(self):
-        """Return configuration as dictionary"""
-        return self.config.copy()
+    def save_to_file(self, file_path: Union[str, Path]) -> None:
+        """Save configuration to a JSON file"""
+        with open(file_path, 'w') as f:
+            json.dump(self.dict(), f, indent=2)
 
-# Default experiment configurations for different losses
-default_configs = {
-    'infonce': ExperimentConfig(
-        loss='infonce',
-        loss_kwargs={'temperature': 0.1},
-        batch_size=16,
-        epochs=5
+
+# Predefined experiment configurations
+PREDEFINED_CONFIGS = {
+    # Standard InfoNCE with in-batch negatives
+    'infonce_standard': ExperimentConfig(
+        name="InfoNCE Standard",
+        dataset_strategy="flexible",
+        batch_transform="infonce",
+        take_top=True,
+        loss_type="infonce",
+        temperature=0.1
     ),
     
-    'infonce_no_batch_neg': ExperimentConfig(
-        loss='infonce_no_batch_neg',
-        loss_kwargs={'temperature': 0.1},
-        batch_size=16,
-        epochs=5
+    # InfoNCE with random answer selection
+    'infonce_random': ExperimentConfig(
+        name="InfoNCE Random",
+        dataset_strategy="flexible",
+        batch_transform="infonce",
+        take_top=False,  # Choose random answer instead of top
+        loss_type="infonce",
+        temperature=0.1
     ),
     
-    'infonce_no_hard_neg': ExperimentConfig(
-        loss='infonce_no_hard_neg',
-        loss_kwargs={'temperature': 0.1},
-        batch_size=16,
-        epochs=5
+    # Multiple positives with rank weighting
+    'multiple_positives_rank': ExperimentConfig(
+        name="Multiple Positives with Ranks",
+        dataset_strategy="flexible",
+        batch_transform="multiple_positives",
+        pos_count=3,
+        use_ranks=True,
+        use_scores=False,
+        rank_weight=0.1,
+        loss_type="rank_infonce",
+        temperature=0.1
     ),
     
-    'mse': ExperimentConfig(
-        loss='mse',
-        loss_kwargs={'normalize': True},
-        batch_size=16,
-        epochs=5
+    # Multiple positives with score weighting
+    'multiple_positives_score': ExperimentConfig(
+        name="Multiple Positives with Scores",
+        dataset_strategy="flexible",
+        batch_transform="multiple_positives",
+        pos_count=3,
+        use_ranks=False,
+        use_scores=True,
+        score_weight=0.05,
+        loss_type="rank_infonce",
+        temperature=0.1
     ),
     
-    'triplet': ExperimentConfig(
-        loss='triplet',
-        loss_kwargs={'margin': 0.2},
-        batch_size=16,
-        epochs=5
+    # Hard negative approach
+    'hard_negative': ExperimentConfig(
+        name="Hard Negative InfoNCE",
+        dataset_strategy="flexible",
+        batch_transform="hard_negative",
+        hard_negative_weight=1.0,
+        loss_type="hard_negative",
+        temperature=0.1
     ),
     
+    # Triplet loss with hard negatives
+    'triplet_hard_neg': ExperimentConfig(
+        name="Triplet with Hard Negatives",
+        dataset_strategy="flexible",
+        batch_transform="triplet",
+        neg_strategy="hard_negative",
+        loss_type="triplet",
+        margin=0.2
+    ),
+    
+    # Listwise ranking
     'listwise': ExperimentConfig(
-        loss='listwise',
-        loss_kwargs={'temperature': 1.0},
-        batch_size=16,
-        epochs=5,
-        answers_per_question=5
-    ),
-    
-    'listwise_no_batch_neg': ExperimentConfig(
-        loss='listwise_no_batch_neg',
-        loss_kwargs={'temperature': 1.0},
-        batch_size=16,
-        epochs=5,
-        answers_per_question=5
+        name="Listwise Ranking",
+        dataset_strategy="flexible",
+        batch_transform="listwise",
+        max_answers=5,
+        loss_type="listwise",
+        temperature=1.0
     )
 }

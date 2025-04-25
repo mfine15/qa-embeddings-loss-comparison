@@ -12,19 +12,19 @@ import torch
 import torch.optim as optim
 import wandb
 import json
-import random
 from tqdm import tqdm
 from transformers import DistilBertTokenizerFast
 
-from rank_test.config import ExperimentConfig, PREDEFINED_CONFIGS
+from rank_test.config_model import ExperimentConfig, PREDEFINED_CONFIGS
 from rank_test.models import QAEmbeddingModel
-from rank_test.dataset import (
+from rank_test.dataset import ensure_dataset_exists
+from rank_test.flexible_dataset import (
     FlexibleQADataset, 
     get_batch_transform,
-    ensure_dataset_exists
 )
-from rank_test.losses import create_flexible_loss
-from rank_test.evaluate import evaluate_model
+from rank_test.flexible_losses import create_flexible_loss
+from rank_test.evaluate import evaluate_model as evaluate_original
+from rank_test.evaluate_fixed import evaluate_model as evaluate_fixed
 
 
 def get_device():
@@ -74,17 +74,10 @@ def train_epoch(model, dataloader, loss_fn, optimizer, device, epoch, config,
     batch_times = []
     start_time = time.time()
     
-    # Global step counter and doc counter
+    # Global step counter
     global_step = step_offset
-    cumulative_docs = 0
     
-    for batch_idx, batch_data in enumerate(progress_bar):
-        # Extract batch and document count
-        if isinstance(batch_data, tuple) and len(batch_data) == 2:
-            batch, cumulative_docs = batch_data
-        else:
-            batch = batch_data
-        
+    for batch_idx, batch in enumerate(progress_bar):
         # Update global step
         global_step += 1
         
@@ -232,8 +225,6 @@ def train_epoch(model, dataloader, loss_fn, optimizer, device, epoch, config,
         batch_metrics_log = {f"batch/{k}": v for k, v in batch_metrics.items()}
         batch_metrics_log["batch/loss"] = loss.item()
         batch_metrics_log["global_step"] = global_step
-        batch_metrics_log["cumulative_docs_seen"] = cumulative_docs
-        batch_metrics_log["docs_per_step"] = cumulative_docs / max(global_step, 1)
         
         # Calculate batch time
         batch_time = time.time() - batch_start
@@ -262,8 +253,11 @@ def train_epoch(model, dataloader, loss_fn, optimizer, device, epoch, config,
             
             print(f"\nRunning evaluation at step {global_step}...")
             try:
-                # Run evaluation
-                test_metrics = evaluate_model(model, test_dataloader, device)
+                # Run evaluation with the correct evaluation function
+                if config.use_fixed_evaluation:
+                    test_metrics = evaluate_fixed(model, test_dataloader, device)
+                else:
+                    test_metrics = evaluate_original(model, test_dataloader, device)
                 
                 # Print metrics
                 print(f"Step {global_step} evaluation results:")
@@ -323,8 +317,11 @@ def train_model(config: ExperimentConfig):
     Returns:
         Trained model and evaluation metrics
     """
-    # Initialize training
-    print("Using enhanced evaluation with standardized test format")
+    # Determine whether to use fixed evaluation
+    if config.use_fixed_evaluation:
+        print("Using FIXED hard negative evaluation implementation")
+    else:
+        print("Using ORIGINAL hard negative evaluation implementation")
     
     # Ensure dataset exists
     data_path = config.data_path
@@ -375,31 +372,7 @@ def train_model(config: ExperimentConfig):
         # Get batch transform function
         batch_transform_fn = get_batch_transform(config.batch_transform)
         
-        # Load all data
-        with open(data_path, 'r') as f:
-            all_data = json.load(f)
-        
-        # Split data based on test size
-        num_items = len(all_data)
-        test_size = config.test_size
-        test_count = int(num_items * test_size)
-        
-        # Create indices and shuffle
-        indices = list(range(num_items))
-        random.seed(config.seed)  # Use seed for reproducibility
-        random.shuffle(indices)
-        
-        # Split indices
-        test_indices = indices[:test_count]
-        train_indices = indices[test_count:]
-        
-        # Create train and test datasets
-        train_data = [all_data[i] for i in train_indices]
-        test_data = [all_data[i] for i in test_indices]
-        
-        print(f"Splitting dataset: {len(train_data)} training samples, {len(test_data)} test samples")
-        
-        # Create flexible dataset for training
+        # Create flexible dataset
         print("Creating flexible dataset")
         dataset = FlexibleQADataset(
             data_path=data_path,
@@ -409,32 +382,22 @@ def train_model(config: ExperimentConfig):
             max_length=128,
             **config.get_batch_transform_kwargs()
         )
-        # Override raw data with train split
-        dataset.raw_data = train_data
-        # Recreate batches with train data
-        dataset.batches = dataset._create_batches()
         
-        # Create dataloader
+        # Create dataloader (note: batch_size=1 since dataset already returns batches
+        # )
         print("Creating train dataloader")
         train_loader = FlexibleQADataset.get_dataloader(dataset, shuffle=True)
         
-        # Create standardized test dataset that's consistent across all training methods
-        print("Creating standardized test dataset")
-        # Always use the standardized test transform regardless of training strategy
-        test_transform_fn = get_batch_transform("standardized_test")
-        test_batch_size = min(len(test_data), config.get_batch_size() * 4)  # Use larger batches for testing
-        
+        # Create test dataset with same transform but smaller batch size
+        print("Creating test dataset")
         test_dataset = FlexibleQADataset(
             data_path=data_path,
-            batch_transform_fn=test_transform_fn,
-            batch_size=test_batch_size,
+            batch_transform_fn=batch_transform_fn,
+            batch_size=config.get_batch_size(),  # Smaller batch for testing
             tokenizer=tokenizer,
-            max_length=128
+            max_length=128,
+            **config.get_batch_transform_kwargs()
         )
-        # Override raw data with test split
-        test_dataset.raw_data = test_data
-        # Recreate batches with test data
-        test_dataset.batches = test_dataset._create_batches()
         
         test_loader = FlexibleQADataset.get_dataloader(test_dataset, shuffle=False)
         
@@ -475,8 +438,11 @@ def train_model(config: ExperimentConfig):
         try:
             model.eval()
             
-            # Run evaluation
-            initial_metrics = evaluate_model(model, test_loader, device)
+            # Use the appropriate evaluation function
+            if config.use_fixed_evaluation:
+                initial_metrics = evaluate_fixed(model, test_loader, device)
+            else:
+                initial_metrics = evaluate_original(model, test_loader, device)
             
             # Print metrics
             print("Step 0 evaluation results:")
@@ -542,8 +508,11 @@ def train_model(config: ExperimentConfig):
     # Evaluate on test set
     if test_loader is not None:
         print("\nEvaluating on test set...")
-        # Run evaluation
-        test_metrics = evaluate_model(model, test_loader, device)
+        # Use the appropriate evaluation function
+        if config.use_fixed_evaluation:
+            test_metrics = evaluate_fixed(model, test_loader, device)
+        else:
+            test_metrics = evaluate_original(model, test_loader, device)
         
         # Print test metrics
         print("\nTest metrics:")

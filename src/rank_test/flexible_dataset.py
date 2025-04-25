@@ -9,11 +9,14 @@ for creating training data from ranked QA pairs.
 
 import json
 import re
+import os
 import random
 import torch
-from typing import List, Dict, Callable
+import time
+from collections import defaultdict
+from typing import List, Dict, Callable, Tuple
 from torch.utils.data import Dataset, DataLoader
-from tqdm import trange
+from tqdm import tqdm, trange
 from transformers import DistilBertTokenizer
 
 def clean_html(text: str) -> str:
@@ -738,3 +741,106 @@ def get_batch_transform(transform_name: str) -> Callable:
         raise ValueError(f"Unknown transform: {transform_name}. Available transforms: {list(transforms.keys())}")
     
     return transforms[transform_name]
+
+
+def parse_from_json(data_path: str, limit: int = None) -> list:
+    """
+    Load QA pairs from a JSON file
+    
+    Args:
+        data_path: Path to the JSON file
+        limit: Maximum number of items to load
+        
+    Returns:
+        List of QA pairs
+    """
+    with open(data_path, 'r') as f:
+        data = json.load(f)
+        
+    if limit is not None:
+        data = data[:limit]
+        
+    return data
+
+
+def export_to_json(data: list, output_path: str = "data/ranked_qa.json") -> None:
+    """
+    Export QA pairs to a JSON file
+    
+    Args:
+        data: List of QA pairs
+        output_path: Path to save the JSON file
+    """
+    print(f"Exporting data to {output_path}...")
+    
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    
+    print(f"Exported {len(data)} question-answer sets to {output_path}")
+
+
+def ensure_dataset_exists(data_path: str = 'data/ranked_qa.json', 
+                           data_limit: int = None, 
+                           force_regenerate: bool = False) -> None:
+    """
+    Ensure the dataset exists, generating it if necessary.
+    
+    Args:
+        data_path: Path where the JSON dataset should be stored
+        data_limit: Limit the number of questions to process
+        force_regenerate: Force regeneration even if file exists
+    """
+    # Check current limit if file exists
+    current_limit = None
+    regenerate_needed = force_regenerate
+    
+    if os.path.exists(data_path) and not force_regenerate:
+        # Try to determine the current limit from the dataset
+        try:
+            with open(data_path, 'r') as f:
+                data = json.load(f)
+                current_limit = len(data)
+                print(f"Found existing dataset at {data_path} with {current_limit} items")
+                
+                # If data_limit is specified and different from current, regenerate
+                if data_limit is not None and data_limit != current_limit:
+                    print(f"Requested limit ({data_limit}) differs from current dataset size ({current_limit})")
+                    regenerate_needed = True
+                else:
+                    return  # Dataset exists with correct limit
+        except Exception as e:
+            print(f"Error reading existing dataset: {e}")
+            regenerate_needed = True  # Regenerate if there's an issue with the file
+    else:
+        regenerate_needed = True
+    
+    if regenerate_needed:
+        if os.path.exists(data_path):
+            action = "Regenerating" if force_regenerate else "Updating"
+            print(f"{action} dataset at {data_path} with limit={data_limit}")
+        else:
+            print(f"Dataset not found at {data_path}. Generating it with limit={data_limit}")
+        
+        # Import here to avoid circular imports
+        from rank_test.dataset import download_dataset, parse_posts
+        
+        # Get path for data directory
+        data_dir = download_dataset()
+            
+        # Parse posts from CSV files
+        print(f"Using CSV files in {data_dir}")
+        questions, answers = parse_posts(data_dir, limit=data_limit)
+        
+        # Convert to the format expected by our JSON dataset
+        data = []
+        for q_id, question in questions.items():
+            if q_id in answers:
+                item = {
+                    "question": question,
+                    "answers": answers[q_id]
+                }
+                data.append(item)
+        
+        # Export to JSON
+        export_to_json(data, data_path)
