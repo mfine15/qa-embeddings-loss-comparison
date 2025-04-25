@@ -76,6 +76,8 @@ class QADataset(Dataset):
             random.shuffle(indices)
         
         batches = []
+        print(f"Creating {len(indices)} batches of size {self.batch_size}")
+        print(f"Using tokenizer: {self.tokenizer}")
         
         for i in trange(0, num_items, self.batch_size, desc="Creating batches"):
             batch_indices = indices[i:i+self.batch_size]
