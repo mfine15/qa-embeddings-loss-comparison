@@ -89,6 +89,7 @@ class QADataset(Dataset):
                 
             # Clean text
             q_text = question['title'] + " " + self._clean_html(question['body'])
+            q_id = question['id']  # Store question ID for tracking
             
             # Process each answer
             for i, answer in enumerate(answers):
@@ -97,7 +98,9 @@ class QADataset(Dataset):
                 # Create a pair
                 pair = {
                     'question': q_text,
+                    'question_id': q_id,  # Add question ID for evaluation
                     'answer': a_text,
+                    'answer_id': answer['id'],
                     'score': float(answer['score']),
                     'is_best': i == 0  # First answer is highest scored
                 }
@@ -140,6 +143,8 @@ class QADataset(Dataset):
             'a_input_ids': a_encoding['input_ids'].squeeze(0),
             'a_attention_mask': a_encoding['attention_mask'].squeeze(0),
             'is_best': torch.tensor(pair['is_best'], dtype=torch.float32),
+            'question_id': pair['question_id'],  # Add question ID for evaluation
+            'answer_id': pair['answer_id'],
         }
         
         # Include scores if requested

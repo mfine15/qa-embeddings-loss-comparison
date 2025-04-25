@@ -3,19 +3,12 @@
 
 import json
 import os
-import sys
 import torch
 import numpy as np
-from transformers import DistilBertTokenizer
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import pandas as pd
 import wandb
-
-# Import model and dataset classes
-from rank_test.models import QAEmbeddingModel
-from rank_test.dataset import QADataset, create_dataloaders
 
 def ndcg_at_k(relevances, k):
     """
@@ -71,25 +64,30 @@ def map_at_k(relevances, k):
 
 def mrr(relevances):
     """
-    Calculate Mean Reciprocal Rank (MRR)
+    Calculate Reciprocal Rank (RR) for a single query
     
     Args:
         relevances: List of relevance scores in rank order
+                   (sorted by similarity/relevance in descending order)
         
     Returns:
-        MRR score
+        Reciprocal Rank score (1/rank of first relevant item)
     """
     relevances = np.array(relevances)
     # Find index of first relevant result
     indices = np.where(relevances > 0)[0]
     if len(indices) > 0:
-        return 1.0 / (indices[0] + 1)
+        rank = indices[0] + 1  # +1 because indices are 0-based
+        return 1.0 / rank
     else:
         return 0.0
 
 def evaluate_model(model, test_dataloader, device, k_values=[1, 5, 10]):
     """
-    Evaluate model performance on test data
+    Evaluate model performance on test data with three accuracy types:
+    1. Overall accuracy - considering all answers in the test set
+    2. In-batch negative accuracy - ignoring hard negatives from same question
+    3. Hard negative accuracy - only comparing with answers to the same question
     
     Args:
         model: QAEmbeddingModel
@@ -102,38 +100,60 @@ def evaluate_model(model, test_dataloader, device, k_values=[1, 5, 10]):
     """
     model.eval()
     
-    # Collect all embeddings and relevance scores
+    # Collect all embeddings, relevance scores, and question IDs
     all_q_embeddings = []
     all_a_embeddings = []
-    all_relevance_scores = []
+    all_question_ids = []  # To track which answers belong to which questions
+    
+    # Extract data to track which answers belong to which questions
+    question_data = {}  # Map question ID to list of answer indices
     
     with torch.no_grad():
-        for batch in tqdm(test_dataloader, desc="Calculating embeddings"):
+        for batch_idx, batch in enumerate(tqdm(test_dataloader, desc="Calculating embeddings")):
             # Get embeddings
             q_embeddings = model(batch['q_input_ids'].to(device), 
                                 batch['q_attention_mask'].to(device))
             a_embeddings = model(batch['a_input_ids'].to(device), 
                                 batch['a_attention_mask'].to(device))
             
-            # Store embeddings and scores
+            # Store embeddings
             all_q_embeddings.append(q_embeddings.cpu())
             all_a_embeddings.append(a_embeddings.cpu())
-            if 'relevance' in batch:
-                all_relevance_scores.append(batch['relevance'].cpu())
+            
+            # Track question IDs (create indices if not provided)
+            batch_size = q_embeddings.shape[0]
+            q_ids = batch.get('question_id', [f"{batch_idx}_{i}" for i in range(batch_size)])
+            all_question_ids.extend(q_ids)
+            
+            # Store indices of this batch
+            start_idx = sum(len(e) for e in all_a_embeddings[:-1])
+            for i, q_id in enumerate(q_ids):
+                if q_id not in question_data:
+                    question_data[q_id] = []
+                question_data[q_id].append(start_idx + i)
     
     # Concatenate all embeddings
     all_q_embeddings = torch.cat(all_q_embeddings, dim=0)
     all_a_embeddings = torch.cat(all_a_embeddings, dim=0)
-    if all_relevance_scores:
-        all_relevance_scores = torch.cat(all_relevance_scores, dim=0)
     
     # Calculate similarity matrix for all question-answer pairs
     similarity = torch.matmul(all_q_embeddings, all_a_embeddings.T)
     
     # Initialize metrics
     metrics = {
+        # Overall metrics (all answers)
         'mrr': 0.0,
+        'accuracy@1': 0.0,
+        
+        # In-batch negative metrics (ignoring hard negatives)
+        'mrr_in_batch': 0.0,
+        'accuracy@1_in_batch': 0.0,
+        
+        # Hard negative metrics (only answers for same question)
+        'mrr_hard_neg': 0.0,
+        'accuracy@1_hard_neg': 0.0,
     }
+    
     for k in k_values:
         metrics[f'ndcg@{k}'] = 0.0
         metrics[f'map@{k}'] = 0.0
@@ -141,10 +161,21 @@ def evaluate_model(model, test_dataloader, device, k_values=[1, 5, 10]):
     # Dictionary to track metrics for each query
     per_query_metrics = {
         'mrr': [],
+        'mrr_in_batch': [],
+        'mrr_hard_neg': [],
     }
+    
     for k in k_values:
         per_query_metrics[f'ndcg@{k}'] = []
         per_query_metrics[f'map@{k}'] = []
+        
+    # IMPORTANT: How the three types of accuracy work:
+    # 1. Overall accuracy - Ranks across ALL answers in the test set
+    #    - For each question, how well its correct answer ranks among all possible answers
+    # 2. In-batch negative accuracy - Only considers answers NOT from the same question
+    #    - For each question, how well its answer ranks among answers to other questions
+    # 3. Hard negative accuracy - Only considers answers to the same question
+    #    - For each question, how well its correct answer ranks among all answers for that question
     
     # Calculate metrics for each query
     n_queries = similarity.shape[0]
@@ -152,25 +183,29 @@ def evaluate_model(model, test_dataloader, device, k_values=[1, 5, 10]):
         # Get similarities for this query
         query_similarities = similarity[i].numpy()
         
-        # Get relevance scores (either from dataset or from ground truth)
-        if all_relevance_scores:
-            # Use provided relevance scores
-            relevance = all_relevance_scores[i].numpy()
-        else:
-            # Create binary relevance (1 for matches, 0 for non-matches)
-            relevance = np.zeros_like(query_similarities)
-            relevance[i] = 1  # Correct answer is at index i
+        # Create binary relevance (1 for matches, 0 for non-matches)
+        relevance = np.zeros_like(query_similarities)
+        relevance[i] = 1  # Correct answer is at index i
         
-        # Sort by similarity (descending)
+        # Get question ID for this query
+        q_id = all_question_ids[i]
+        
+        # Get indices of all answers to this question (hard negatives)
+        hard_negative_indices = question_data[q_id]
+        
+        # 1. Overall ranking (all answers)
         sorted_indices = np.argsort(-query_similarities)
         sorted_relevances = relevance[sorted_indices]
         
-        # Calculate MRR
+        # Calculate overall MRR and metrics
         query_mrr = mrr(sorted_relevances)
         metrics['mrr'] += query_mrr
         per_query_metrics['mrr'].append(query_mrr)
         
-        # Calculate NDCG@k and MAP@k
+        # Add accuracy@1 - whether the correct answer is ranked first
+        metrics['accuracy@1'] += 1.0 if sorted_indices[0] == i else 0.0
+        
+        # Calculate NDCG@k and MAP@k for overall ranking
         for k in k_values:
             query_ndcg = ndcg_at_k(sorted_relevances, k)
             query_map = map_at_k(sorted_relevances, k)
@@ -180,14 +215,70 @@ def evaluate_model(model, test_dataloader, device, k_values=[1, 5, 10]):
             
             per_query_metrics[f'ndcg@{k}'].append(query_ndcg)
             per_query_metrics[f'map@{k}'].append(query_map)
+        
+        # 2. In-batch negative ranking (excluding hard negatives)
+        # Create mask that excludes hard negatives
+        in_batch_mask = np.ones_like(query_similarities, dtype=bool)
+        for idx in hard_negative_indices:
+            if idx != i:  # Keep the correct answer
+                in_batch_mask[idx] = False
+        
+        # Only consider in-batch negatives
+        in_batch_similarities = query_similarities[in_batch_mask]
+        in_batch_relevance = relevance[in_batch_mask]
+        
+        # Get correct answer index in this reduced set
+        correct_idx = np.where(in_batch_mask)[0].tolist().index(i)
+        
+        # Sort by similarity (descending)
+        in_batch_sorted_indices = np.argsort(-in_batch_similarities)
+        in_batch_sorted_relevances = in_batch_relevance[in_batch_sorted_indices]
+        
+        # Calculate MRR for in-batch negatives
+        query_mrr_in_batch = mrr(in_batch_sorted_relevances)
+        metrics['mrr_in_batch'] += query_mrr_in_batch
+        per_query_metrics['mrr_in_batch'].append(query_mrr_in_batch)
+        
+        # Add accuracy@1 for in-batch negatives
+        metrics['accuracy@1_in_batch'] += 1.0 if in_batch_sorted_indices[0] == correct_idx else 0.0
+        
+        # 3. Hard negative ranking (only answers to same question)
+        # Skip if there's only one answer for this question
+        if len(hard_negative_indices) > 1:
+            # Get similarities for just the answers to this question
+            hard_neg_similarities = query_similarities[hard_negative_indices]
+            
+            # Create relevance scores for just these answers
+            hard_neg_relevance = np.zeros_like(hard_neg_similarities)
+            hard_neg_relevance[hard_negative_indices.index(i)] = 1  # Mark correct answer
+            
+            # Sort by similarity (descending)
+            hard_neg_sorted_indices = np.argsort(-hard_neg_similarities)
+            hard_neg_sorted_relevances = hard_neg_relevance[hard_neg_sorted_indices]
+            
+            # Calculate MRR for hard negatives
+            query_mrr_hard_neg = mrr(hard_neg_sorted_relevances)
+            metrics['mrr_hard_neg'] += query_mrr_hard_neg
+            per_query_metrics['mrr_hard_neg'].append(query_mrr_hard_neg)
+            
+            # Add accuracy@1 for hard negatives
+            correct_idx_in_hard_neg = hard_negative_indices.index(i)
+            metrics['accuracy@1_hard_neg'] += 1.0 if hard_neg_sorted_indices[0] == correct_idx_in_hard_neg else 0.0
     
     # Average metrics across all queries
     for key in metrics:
-        metrics[key] /= n_queries
+        if key == 'mrr_hard_neg' or key == 'accuracy@1_hard_neg':
+            # Only average over questions that have multiple answers
+            num_questions_with_multiple_answers = sum(len(indices) > 1 for indices in question_data.values())
+            if num_questions_with_multiple_answers > 0:
+                metrics[key] /= num_questions_with_multiple_answers
+        else:
+            metrics[key] /= n_queries
     
     # Add std dev for each metric
     for key in per_query_metrics:
-        metrics[f'{key}_std'] = np.std(per_query_metrics[key])
+        if per_query_metrics[key]:
+            metrics[f'{key}_std'] = np.std(per_query_metrics[key])
     
     return metrics
 
@@ -246,139 +337,3 @@ def compare_models(results, output_dir='results'):
     print(f"Model comparison saved to {output_dir}")
     return df
 
-def run_evaluation(config):
-    """
-    Run evaluation for a given experiment configuration
-    
-    Args:
-        config: Dictionary with experiment configuration
-        
-    Returns:
-        Dictionary of evaluation metrics
-    """
-    # Set device
-    if torch.backends.mps.is_available():
-        device = torch.device("mps")
-    elif torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        device = torch.device("cpu")
-    
-    print(f"Using device: {device}")
-    
-    # Load model
-    model_path = config.get('model_path')
-    if not model_path or not os.path.exists(model_path):
-        raise ValueError(f"Model not found at {model_path}")
-    
-    model = QAEmbeddingModel(config.get('embed_dim', 768), config.get('projection_dim', 128))
-    model.load_state_dict(torch.load(model_path, map_location=device))
-    model = model.to(device)
-    model.eval()
-    
-    # Create test dataloader
-    dataset = QADataset(
-        data_path=config.get('data_path', 'data/ranked_qa.json'),
-        split='test',
-        test_size=config.get('test_size', 0.2),
-        seed=config.get('seed', 42)
-    )
-    
-    _, test_loader = create_dataloaders(
-        dataset, 
-        batch_size=config.get('batch_size', 32),
-        split='test'
-    )
-    
-    # Run evaluation
-    metrics = evaluate_model(
-        model=model,
-        test_dataloader=test_loader,
-        device=device,
-        k_values=config.get('k_values', [1, 5, 10])
-    )
-    
-    # Print results
-    print(f"\nEvaluation results for {os.path.basename(model_path)}:")
-    for metric, value in metrics.items():
-        print(f"{metric}: {value:.4f}")
-    
-    return metrics
-
-def main():
-    """Main function for model evaluation"""
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Evaluate QA embedding models")
-    parser.add_argument("--model", type=str, required=True, help="Path to the model or directory with multiple models")
-    parser.add_argument("--data", type=str, default="data/ranked_qa.json", help="Path to the dataset")
-    parser.add_argument("--output", type=str, default="results", help="Output directory for results")
-    parser.add_argument("--batch-size", type=int, default=32, help="Batch size for evaluation")
-    parser.add_argument("--test-size", type=float, default=0.2, help="Proportion of data to use for testing")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument("--wandb", action="store_true", help="Log results to Weights & Biases")
-    
-    args = parser.parse_args()
-    
-    # Initialize wandb if requested
-    if args.wandb:
-        wandb.init(project="qa-embeddings-evaluation")
-    
-    # Determine if evaluating a single model or comparing multiple models
-    if os.path.isdir(args.model):
-        # Find all model files in the directory
-        model_files = [os.path.join(args.model, f) for f in os.listdir(args.model) 
-                      if f.endswith('.pt') or f.endswith('.pth')]
-        
-        if not model_files:
-            print(f"No model files found in {args.model}")
-            return
-        
-        # Evaluate each model
-        results = {}
-        for model_path in model_files:
-            model_name = os.path.basename(model_path).replace('.pt', '').replace('.pth', '')
-            print(f"\nEvaluating model: {model_name}")
-            
-            config = {
-                'model_path': model_path,
-                'data_path': args.data,
-                'batch_size': args.batch_size,
-                'test_size': args.test_size,
-                'seed': args.seed
-            }
-            
-            metrics = run_evaluation(config)
-            results[model_name] = metrics
-            
-            # Log to wandb
-            if args.wandb:
-                wandb_metrics = {f"{model_name}/{k}": v for k, v in metrics.items()}
-                wandb.log(wandb_metrics)
-        
-        # Compare models
-        comparison = compare_models(results, args.output)
-        print("\nModel Comparison:")
-        print(comparison.to_string(index=False))
-        
-    else:
-        # Evaluate a single model
-        config = {
-            'model_path': args.model,
-            'data_path': args.data,
-            'batch_size': args.batch_size,
-            'test_size': args.test_size,
-            'seed': args.seed
-        }
-        
-        metrics = run_evaluation(config)
-        
-        # Log to wandb
-        if args.wandb:
-            wandb.log(metrics)
-    
-    if args.wandb:
-        wandb.finish()
-
-if __name__ == "__main__":
-    main()
