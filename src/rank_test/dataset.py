@@ -78,7 +78,6 @@ class QADataset(Dataset):
             random.shuffle(indices)
         
         batches = []
-        total_docs = 0
         
         for i in trange(0, num_items, self.batch_size, desc="Creating batches"):
             batch_indices = indices[i:i+self.batch_size]
@@ -95,15 +94,14 @@ class QADataset(Dataset):
             # Handle return value (either just batch or batch with doc count)
             if isinstance(result, tuple) and len(result) == 2:
                 processed_batch, batch_docs = result
-                total_docs += batch_docs
             else:
                 processed_batch = result
                 # Estimate docs if not provided (backward compatibility)
-                total_docs += len(batch_data) * 2  # Rough estimate: 1 question + 1 answer per item
+                batch_docs = len(batch_data) * 2  # Rough estimate: 1 question + 1 answer per item
             
             if processed_batch:  # Skip empty batches
-                # Store batch with cumulative doc count
-                batches.append((processed_batch, total_docs))
+                # Store batch with its individual doc count (not cumulative)
+                batches.append((processed_batch, batch_docs))
                 
         return batches
     

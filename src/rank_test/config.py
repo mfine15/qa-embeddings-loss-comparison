@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 DatasetStrategyType = Literal["standard", "flexible"]
 BatchTransformType = Literal["infonce", "multiple_positives", "hard_negative", "triplet", "listwise"]
 NegativeStrategyType = Literal["hard_negative", "in_batch", "mixed"]
-LossType = Literal["infonce", "rank_infonce", "hard_negative", "multiple_positives", "triplet", "listwise", "mse"]
+LossType = Literal["infonce", "rank_infonce", "relaxed_hard_neg", "triplet", "listwise", "mse"]
 
 
 class ExperimentConfig(BaseModel):
@@ -88,7 +88,7 @@ class ExperimentConfig(BaseModel):
                 elif batch_transform == "multiple_positives":
                     values['loss_type'] = "rank_infonce"
                 elif batch_transform == "hard_negative":
-                    values['loss_type'] = "hard_negative"
+                    values['loss_type'] = "relaxed_hard_neg"
                 elif batch_transform == "triplet":
                     values['loss_type'] = "triplet"
                 elif batch_transform == "listwise":
@@ -115,7 +115,7 @@ class ExperimentConfig(BaseModel):
         loss_type = self.loss_type
         
         # Add loss-specific parameters
-        if loss_type in ["infonce", "rank_infonce", "hard_negative", "listwise"]:
+        if loss_type in ["infonce", "rank_infonce", "relaxed_hard_neg", "listwise"]:
             kwargs['temperature'] = self.temperature
             
         if loss_type == "rank_infonce":
@@ -124,8 +124,8 @@ class ExperimentConfig(BaseModel):
             kwargs['rank_weight'] = self.rank_weight
             kwargs['score_weight'] = self.score_weight
             
-        elif loss_type == "hard_negative":
-            kwargs['hard_negative_weight'] = self.hard_negative_weight
+        elif loss_type == "relaxed_hard_neg":
+            kwargs['hard_neg_target_prob'] = self.hard_negative_weight
             
         elif loss_type == "triplet":
             kwargs['margin'] = self.margin
@@ -233,11 +233,11 @@ PREDEFINED_CONFIGS = {
     
     # Hard negative approach
     'hard_negative': ExperimentConfig(
-        name="Hard Negative InfoNCE",
+        name="Relaxed Hard Negative InfoNCE",
         dataset_strategy="flexible",
         batch_transform="hard_negative",
-        hard_negative_weight=1.0,
-        loss_type="hard_negative",
+        hard_negative_weight=0.1,  # Target probability for hard negatives
+        loss_type="relaxed_hard_neg",
         temperature=0.1
     ),
     

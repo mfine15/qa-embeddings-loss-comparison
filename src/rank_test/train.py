@@ -76,14 +76,19 @@ def train_epoch(model, dataloader, loss_fn, optimizer, device, epoch, config,
     
     # Global step counter and doc counter
     global_step = step_offset
-    cumulative_docs = 0
+    cumulative_docs = 0  # Running total of all documents seen
     
     for batch_idx, batch_data in enumerate(progress_bar):
-        # Extract batch and document count
+        # Extract batch and document count (now each batch has its own doc count, not cumulative)
         if isinstance(batch_data, tuple) and len(batch_data) == 2:
-            batch, cumulative_docs = batch_data
+            batch, batch_doc_count = batch_data
         else:
             batch = batch_data
+            # Estimate doc count if not provided (backward compatibility)
+            batch_doc_count = len(batch) * 2  # Rough estimate: 1 question + 1 answer per item
+        
+        # Add batch doc count to running total
+        cumulative_docs += batch_doc_count
         
         # Update global step
         global_step += 1
