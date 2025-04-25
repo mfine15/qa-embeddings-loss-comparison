@@ -25,7 +25,7 @@ dependencies = [
 ]
 
 [project.scripts]
-rank-test = "rank_test.train_flexible:main"
+rank-test = "rank_test.train:main"
 
 [build-system]
 requires = ["hatchling"]

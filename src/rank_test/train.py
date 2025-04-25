@@ -1,23 +1,31 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+"""
+Training module for the flexible QA ranking dataset.
+Supports various dataset strategies and loss functions with Pydantic-based configuration.
+"""
+
 import os
 import time
 import torch
 import torch.optim as optim
-from transformers import DistilBertTokenizer
-from tqdm import tqdm
 import wandb
 import json
-import numpy as np
+from tqdm import tqdm
+from transformers import DistilBertTokenizerFast
 
+from rank_test.config_model import ExperimentConfig, PREDEFINED_CONFIGS
 from rank_test.models import QAEmbeddingModel
-from rank_test.losses import create_loss
-from rank_test.dataset import QADataset, QABatchedDataset, QATripletDataset, create_dataloaders, ensure_dataset_exists
-
-# Import original and fixed evaluation functions - will choose based on config
+from rank_test.dataset import ensure_dataset_exists
+from rank_test.flexible_dataset import (
+    FlexibleQADataset, 
+    get_batch_transform,
+)
+from rank_test.flexible_losses import create_flexible_loss
 from rank_test.evaluate import evaluate_model as evaluate_original
 from rank_test.evaluate_fixed import evaluate_model as evaluate_fixed
+
 
 def get_device():
     """Get appropriate device for training"""
@@ -33,7 +41,9 @@ def get_device():
     
     return device
 
-def train_epoch(model, dataloader, loss_fn, optimizer, device, epoch, test_dataloader=None, eval_steps=None, step_offset=0, use_fixed_evaluation=True):
+
+def train_epoch(model, dataloader, loss_fn, optimizer, device, epoch, config, 
+               test_dataloader=None, step_offset=0):
     """
     Train model for one epoch
     
@@ -44,8 +54,8 @@ def train_epoch(model, dataloader, loss_fn, optimizer, device, epoch, test_datal
         optimizer: Optimizer
         device: Device to train on
         epoch: Current epoch number
+        config: Configuration object
         test_dataloader: DataLoader with test data for periodic evaluation
-        eval_steps: Number of steps between evaluations
         step_offset: Global step count offset from previous epochs
         
     Returns:
@@ -74,59 +84,129 @@ def train_epoch(model, dataloader, loss_fn, optimizer, device, epoch, test_datal
         # Calculate batch processing time
         batch_start = time.time()
         
-        # Move data to device
-        if isinstance(dataloader.dataset, QATripletDataset):
-            # Handle triplet dataset
+        # Process batch based on transform type
+        batch_transform = config.batch_transform
+        
+        if batch_transform == "triplet":
+            # Process triplet format
             q_embeddings = model(batch['q_input_ids'].to(device), 
-                                batch['q_attention_mask'].to(device))
-            pos_embeddings = model(batch['pos_input_ids'].to(device), 
-                                  batch['pos_attention_mask'].to(device))
-            neg_embeddings = model(batch['neg_input_ids'].to(device), 
-                                  batch['neg_attention_mask'].to(device))
+                               batch['q_attention_mask'].to(device))
+            a_pos_embeddings = model(batch['a_pos_input_ids'].to(device), 
+                                   batch['a_pos_attention_mask'].to(device))
+            a_neg_embeddings = model(batch['a_neg_input_ids'].to(device), 
+                                   batch['a_neg_attention_mask'].to(device))
             
             # Calculate loss
-            loss, batch_metrics = loss_fn(q_embeddings, pos_embeddings, neg_embeddings)
+            loss, batch_metrics = loss_fn(q_embeddings, a_pos_embeddings, a_neg_embeddings)
             
-        elif isinstance(dataloader.dataset, QABatchedDataset):
-            # Handle batched dataset
-            q_embeddings = model(batch['q_input_ids'].to(device), 
-                                batch['q_attention_mask'].to(device))
+        elif batch_transform == "listwise":
+            # Process listwise format - each item in batch has a question and multiple answers
+            loss_total = 0
+            batch_metrics_sum = {}
             
-            # For listwise losses, handle multiple answers per question
-            batch_size = q_embeddings.shape[0]
-            a_list_embeddings = []
-            a_list_scores = []
-            
-            # Process each answer set separately
-            for i in range(batch_size):
-                a_ids = batch['a_input_ids'][i].to(device)
-                a_mask = batch['a_attention_masks'][i].to(device)
-                a_emb = model(a_ids, a_mask)
+            for item in batch:
+                # Process question
+                q_embedding = model(item['q_input_ids'].unsqueeze(0).to(device), 
+                                  item['q_attention_mask'].unsqueeze(0).to(device))
                 
-                a_list_embeddings.append(a_emb)
-                a_list_scores.append(batch['scores'][i])
+                # Process all answers for this question
+                a_embeddings = model(item['a_input_ids'].to(device), 
+                                   item['a_attention_masks'].to(device))
+                
+                # Calculate loss for this question
+                item_loss, item_metrics = loss_fn(
+                    [q_embedding], 
+                    [a_embeddings], 
+                    [item['scores'].to(device)]
+                )
+                
+                # Accumulate loss and metrics
+                loss_total += item_loss
+                for k, v in item_metrics.items():
+                    if k in batch_metrics_sum:
+                        batch_metrics_sum[k] += v
+                    else:
+                        batch_metrics_sum[k] = v
             
-            # Calculate loss
-            loss, batch_metrics = loss_fn(
-                q_embeddings, None,
-                a_list_embeddings=a_list_embeddings,
-                a_list_scores=a_list_scores
-            )
+            # Average metrics across all items in batch
+            batch_count = len(batch)
+            if batch_count > 0:
+                loss = loss_total / batch_count
+                batch_metrics = {k: v / batch_count for k, v in batch_metrics_sum.items()}
+            else:
+                loss = torch.tensor(0.0, device=device)
+                batch_metrics = {'loss': 0.0}
+            
+        elif batch_transform == "hard_negative":
+            # Process hard negative format - each item has a question and multiple answers
+            loss_total = 0
+            batch_metrics_sum = {}
+            total_items = 0
+            
+            for item in batch:
+                # Process question
+                q_input_ids = item['q_input_ids'].unsqueeze(0).to(device)
+                q_attention_mask = item['q_attention_mask'].unsqueeze(0).to(device)
+                q_embedding = model(q_input_ids, q_attention_mask)
+                
+                # Process answers
+                answers = item['answers']
+                a_embeddings = []
+                
+                for answer in answers:
+                    a_input_ids = answer['input_ids'].unsqueeze(0).to(device)
+                    a_attention_mask = answer['attention_mask'].unsqueeze(0).to(device)
+                    a_embedding = model(a_input_ids, a_attention_mask)
+                    a_embeddings.append(a_embedding)
+                
+                a_embeddings = torch.cat(a_embeddings, dim=0)
+                
+                # Create question_ids for loss function (all same ID)
+                question_ids = [item['question_id']] * len(answers)
+                
+                # Calculate loss
+                item_loss, item_metrics = loss_fn(
+                    q_embedding.repeat(len(answers), 1), 
+                    a_embeddings,
+                    question_ids=question_ids
+                )
+                
+                # Accumulate loss and metrics
+                loss_total += item_loss
+                for k, v in item_metrics.items():
+                    if k in batch_metrics_sum:
+                        batch_metrics_sum[k] += v
+                    else:
+                        batch_metrics_sum[k] = v
+                
+                total_items += 1
+            
+            # Average metrics
+            if total_items > 0:
+                loss = loss_total / total_items
+                batch_metrics = {k: v / total_items for k, v in batch_metrics_sum.items()}
+            else:
+                loss = torch.tensor(0.0, device=device)
+                batch_metrics = {'loss': 0.0}
             
         else:
-            # Handle standard QA dataset
+            # Standard format (infonce, multiple_positives)
             q_embeddings = model(batch['q_input_ids'].to(device), 
-                                batch['q_attention_mask'].to(device))
+                               batch['q_attention_mask'].to(device))
             a_embeddings = model(batch['a_input_ids'].to(device), 
-                                batch['a_attention_mask'].to(device))
+                               batch['a_attention_mask'].to(device))
             
             # Additional parameters for different loss functions
-            loss_kwargs = {}
-            if hasattr(loss_fn, 'name') and 'mse' in loss_fn.name.lower():
-                loss_kwargs['upvote_scores'] = batch['score'].to(device)
+            kwargs = {}
+            if 'question_ids' in batch:
+                kwargs['question_ids'] = batch['question_ids']
+            if 'ranks' in batch:
+                kwargs['ranks'] = batch['ranks'].to(device)
+            if 'scores' in batch:
+                kwargs['scores'] = batch['scores'].to(device)
             
             # Calculate loss
-            loss, batch_metrics = loss_fn(q_embeddings, a_embeddings, **loss_kwargs)
+            loss, batch_metrics = loss_fn(q_embeddings, a_embeddings, **kwargs)
         
         # Backward pass and optimization
         optimizer.zero_grad()
@@ -155,6 +235,8 @@ def train_epoch(model, dataloader, loss_fn, optimizer, device, epoch, test_datal
         progress_desc = f"Epoch {epoch+1} | Step {global_step} | "
         if 'acc' in batch_metrics:
             progress_desc += f"Acc: {batch_metrics['acc']:.4f} | "
+        elif 'accuracy' in batch_metrics:
+            progress_desc += f"Acc: {batch_metrics['accuracy']:.4f} | "
         elif 'avg_acc' in batch_metrics:
             progress_desc += f"Acc: {batch_metrics['avg_acc']:.4f} | "
         progress_desc += f"Loss: {loss.item():.4f}"
@@ -165,14 +247,14 @@ def train_epoch(model, dataloader, loss_fn, optimizer, device, epoch, test_datal
             wandb.log(batch_metrics_log)
         
         # Run evaluation if requested
-        if eval_steps and test_dataloader and global_step % eval_steps == 0:
+        if config.eval_steps and test_dataloader and global_step % config.eval_steps == 0:
             # Temporarily switch to eval mode
             model.eval()
             
             print(f"\nRunning evaluation at step {global_step}...")
             try:
                 # Run evaluation with the correct evaluation function
-                if use_fixed_evaluation:
+                if config.use_fixed_evaluation:
                     test_metrics = evaluate_fixed(model, test_dataloader, device)
                 else:
                     test_metrics = evaluate_original(model, test_dataloader, device)
@@ -196,12 +278,12 @@ def train_epoch(model, dataloader, loss_fn, optimizer, device, epoch, test_datal
             
             # Switch back to training mode
             model.train()
-        
+    
     # Calculate epoch averages
     num_batches = len(dataloader)
-    epoch_loss /= num_batches
+    epoch_loss /= max(num_batches, 1)
     for k in epoch_metrics:
-        epoch_metrics[k] /= num_batches
+        epoch_metrics[k] /= max(num_batches, 1)
     
     # Add loss to metrics
     epoch_metrics['loss'] = epoch_loss
@@ -209,7 +291,7 @@ def train_epoch(model, dataloader, loss_fn, optimizer, device, epoch, test_datal
     # Calculate epoch time
     epoch_time = time.time() - start_time
     epoch_metrics['time'] = epoch_time
-    epoch_metrics['avg_batch_time'] = np.mean(batch_times)
+    epoch_metrics['avg_batch_time'] = sum(batch_times) / max(len(batch_times), 1)
     
     # Print epoch summary
     print(f"Epoch {epoch+1} - Loss: {epoch_loss:.4f} | Time: {epoch_time:.2f}s")
@@ -224,172 +306,140 @@ def train_epoch(model, dataloader, loss_fn, optimizer, device, epoch, test_datal
     
     return epoch_metrics, global_step
 
-def train_model(config):
+
+def train_model(config: ExperimentConfig):
     """
-    Train model with given configuration
+    Train model with the given configuration
     
     Args:
-        config: Dictionary with training configuration
+        config: ExperimentConfig object
         
     Returns:
         Trained model and evaluation metrics
     """
     # Determine whether to use fixed evaluation
-    use_fixed_evaluation = config.get('use_fixed_evaluation', True)
-    if use_fixed_evaluation:
+    if config.use_fixed_evaluation:
         print("Using FIXED hard negative evaluation implementation")
     else:
         print("Using ORIGINAL hard negative evaluation implementation")
-    # Extract configuration
-    data_path = config.get('data_path', 'data/ranked_qa.json')
-    output_dir = config.get('output_dir', 'models')
-    batch_size = config.get('batch_size', 16)
-    epochs = config.get('epochs', 5)
-    lr = config.get('learning_rate', 2e-5)
-    limit = config.get('limit', None)
-    debug = config.get('debug', False)
-    loss_name = config.get('loss', 'infonce')
-    loss_kwargs = config.get('loss_kwargs', {})
-    test_size = config.get('test_size', 0.2)
-    seed = config.get('seed', 42)
-    checkpoint_interval = config.get('checkpoint_interval', 1)
-    eval_steps = config.get('eval_steps', None)  # Number of steps between evaluations
-    eval_at_zero = config.get('eval_at_zero', False)  # Whether to evaluate before training
-    force_regenerate = config.get('force_regenerate', False)  # Force dataset regeneration
     
-    # Ensure dataset exists and matches requested limit
+    # Ensure dataset exists
+    data_path = config.data_path
     ensure_dataset_exists(
         data_path=data_path,
-        data_limit=limit,
-        force_regenerate=force_regenerate
+        data_limit=config.get_limit(),
+        force_regenerate=config.force_regenerate
     )
     
     # Get device
     device = get_device()
     
     # Initialize wandb
-    log_to_wandb = config.get('log_to_wandb', True)
-    if log_to_wandb and wandb.run is None:
-        run_name = f"{loss_name}-{time.strftime('%Y%m%d-%H%M%S')}"
+    if config.log_to_wandb and wandb.run is None:
+        run_name = f"{config.loss_type}-{config.batch_transform}-{time.strftime('%Y%m%d-%H%M%S')}"
+        if config.name:
+            run_name = f"{config.name}-{time.strftime('%Y%m%d-%H%M%S')}"
         
         # Create a clean config for wandb logging
-        wandb_config = {
-            # Data settings
-            'data_path': data_path,
-            'limit': limit,
-            'test_size': test_size,
-            
-            # Model settings
-            'embed_dim': config.get('embed_dim', 768),
-            'projection_dim': config.get('projection_dim', 128),
-            
-            # Training settings
-            'batch_size': batch_size,
-            'epochs': epochs,
-            'learning_rate': lr,
-            'loss_type': loss_name,
-            'loss_kwargs': loss_kwargs,
-            'eval_steps': eval_steps,
-            'eval_at_zero': config.get('eval_at_zero', False),
-            'force_regenerate': force_regenerate,
-            
-            # Hardware
-            'device': str(device),
-            
-            # Debug settings
-            'debug': debug
-        }
+        wandb_config = config.dict()
         
         wandb.init(
-            project=config.get('wandb_project', "qa-embeddings-comparison"),
+            project=config.wandb_project,
             name=run_name,
             config=wandb_config
         )
         
-        # Log additional config details as a table
-        if isinstance(loss_kwargs, dict) and loss_kwargs:
+        # Log loss parameters as a table
+        loss_kwargs = config.get_loss_kwargs()
+        if loss_kwargs:
             loss_params = [[k, str(v)] for k, v in loss_kwargs.items()]
             wandb.log({"loss_parameters": wandb.Table(columns=["Parameter", "Value"], 
-                                                     data=loss_params)})
+                                                    data=loss_params)})
     
     # Create model
+    print(f"Creating model with embed_dim={config.embed_dim} and projection_dim={config.projection_dim}")
     model = QAEmbeddingModel(
-        embed_dim=config.get('embed_dim', 768),
-        projection_dim=config.get('projection_dim', 128)
+        embed_dim=config.embed_dim,
+        projection_dim=config.projection_dim
     ).to(device)
     
     # Create tokenizer
-    tokenizer = DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
+    print("Creating tokenizer")
+    tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
     
-    # Create appropriate dataset based on loss
-    if loss_name == 'triplet':
-        dataset = QATripletDataset(
+    # Create dataset based on strategy
+    if config.dataset_strategy == "flexible":
+        # Get batch transform function
+        batch_transform_fn = get_batch_transform(config.batch_transform)
+        
+        # Create flexible dataset
+        print("Creating flexible dataset")
+        dataset = FlexibleQADataset(
             data_path=data_path,
+            batch_transform_fn=batch_transform_fn,
+            batch_size=config.get_batch_size(),
             tokenizer=tokenizer,
-            limit=limit,
-            split='all',
-            test_size=test_size,
-            seed=seed
+            max_length=128,
+            **config.get_batch_transform_kwargs()
         )
-    elif loss_name in ['listwise', 'listwise_no_batch_neg']:
-        dataset = QABatchedDataset(
+        
+        # Create dataloader (note: batch_size=1 since dataset already returns batches
+        # )
+        print("Creating train dataloader")
+        train_loader = FlexibleQADataset.get_dataloader(dataset, shuffle=True)
+        
+        # Create test dataset with same transform but smaller batch size
+        print("Creating test dataset")
+        test_dataset = FlexibleQADataset(
             data_path=data_path,
+            batch_transform_fn=batch_transform_fn,
+            batch_size=min(config.get_batch_size(), 8),  # Smaller batch for testing
             tokenizer=tokenizer,
-            limit=limit,
-            split='all',
-            test_size=test_size,
-            seed=seed,
-            answers_per_question=config.get('answers_per_question', 5)
+            max_length=128,
+            **config.get_batch_transform_kwargs()
         )
+        
+        test_loader = FlexibleQADataset.get_dataloader(test_dataset, shuffle=False)
+        
+        print(f"Created flexible dataset with {len(dataset)} batches")
+        print(f"Test dataset: {len(test_dataset)} batches")
     else:
-        dataset = QADataset(
-            data_path=data_path,
-            tokenizer=tokenizer,
-            limit=limit,
-            split='all',
-            test_size=test_size,
-            seed=seed
-        )
-    
-    # Create train/test split
-    train_loader, test_loader = create_dataloaders(
-        dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        split='both'
-    )
-    
-    print(f"Created dataset with {len(dataset)} samples")
-    print(f"Training set: {len(train_loader.dataset)} samples")
-    print(f"Test set: {len(test_loader.dataset)} samples")
+        # TODO: Use standard dataset approach from original code
+        raise NotImplementedError("Standard dataset strategy not implemented in this module")
     
     # Create loss function
-    loss_fn = create_loss(loss_name, **loss_kwargs)
-    print(f"Using loss function: {loss_name}")
+    loss_kwargs = config.get_loss_kwargs()
+    loss_fn = create_flexible_loss(config.loss_type, **loss_kwargs)
+    print(f"Using loss function: {loss_fn.get_name()}")
     
     # Create optimizer
-    optimizer = optim.AdamW(model.parameters(), lr=lr)
+    optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate)
     
     # Create output directory
-    os.makedirs(output_dir, exist_ok=True)
-    model_dir = os.path.join(output_dir, run_name if wandb.run is not None else "model")
+    os.makedirs(config.output_dir, exist_ok=True)
+    model_dir = os.path.join(config.output_dir, run_name if wandb.run is not None else "model")
     os.makedirs(model_dir, exist_ok=True)
     
+    # Save configuration
+    config_path = os.path.join(model_dir, "config.json")
+    config.save_to_file(config_path)
+    print(f"Saved configuration to {config_path}")
+    
     # Training loop
-    print(f"Starting training for {epochs} epochs")
+    print(f"Starting training for {config.get_epochs()} epochs")
     
     best_metrics = None
     best_loss = float('inf')
     global_step = 0
     
     # Run evaluation at step 0 if requested
-    if eval_at_zero and test_loader is not None:
+    if config.eval_at_zero and test_loader is not None:
         print("\nRunning evaluation at step 0 (initial model)...")
         try:
             model.eval()
             
             # Use the appropriate evaluation function
-            if use_fixed_evaluation:
+            if config.use_fixed_evaluation:
                 initial_metrics = evaluate_fixed(model, test_loader, device)
             else:
                 initial_metrics = evaluate_original(model, test_loader, device)
@@ -418,7 +468,7 @@ def train_model(config):
             print(f"Error during initial evaluation: {e}")
             model.train()
     
-    for epoch in range(epochs):
+    for epoch in range(config.get_epochs()):
         # Train one epoch with step-based evaluation
         metrics, global_step = train_epoch(
             model=model,
@@ -427,14 +477,13 @@ def train_model(config):
             optimizer=optimizer,
             device=device,
             epoch=epoch,
-            test_dataloader=test_loader if eval_steps else None,
-            eval_steps=eval_steps,
-            step_offset=global_step,
-            use_fixed_evaluation=use_fixed_evaluation
+            config=config,
+            test_dataloader=test_loader,
+            step_offset=global_step
         )
         
         # Save checkpoint if requested
-        if (epoch + 1) % checkpoint_interval == 0 or epoch == epochs - 1:
+        if (epoch + 1) % config.checkpoint_interval == 0 or epoch == config.get_epochs() - 1:
             checkpoint_path = os.path.join(model_dir, f"checkpoint_{epoch+1}.pt")
             torch.save(model.state_dict(), checkpoint_path)
             print(f"Saved checkpoint to {checkpoint_path}")
@@ -460,7 +509,7 @@ def train_model(config):
     if test_loader is not None:
         print("\nEvaluating on test set...")
         # Use the appropriate evaluation function
-        if use_fixed_evaluation:
+        if config.use_fixed_evaluation:
             test_metrics = evaluate_fixed(model, test_loader, device)
         else:
             test_metrics = evaluate_original(model, test_loader, device)
@@ -488,86 +537,46 @@ def train_model(config):
     
     return model, best_metrics
 
+
 def main():
-    """Main function to run training"""
+    """Main function to run training from command line"""
     import argparse
     
-    parser = argparse.ArgumentParser(description="Train QA embedding model with various losses")
-    parser.add_argument("--data", type=str, default="data/ranked_qa.json", 
-                        help="Path to the QA dataset")
-    parser.add_argument("--output", type=str, default="models",
-                        help="Directory to save the model")
-    parser.add_argument("--batch-size", type=int, default=16,
-                        help="Batch size for training")
-    parser.add_argument("--epochs", type=int, default=5,
-                        help="Number of epochs to train")
-    parser.add_argument("--lr", type=float, default=2e-5,
-                        help="Learning rate")
-    parser.add_argument("--limit", type=int, default=1000,
-                        help="Limit number of samples to use (for fast iteration)")
-    parser.add_argument("--debug", action="store_true",
-                        help="Debug mode with minimal samples")
-    parser.add_argument("--loss", type=str, default="infonce",
-                        choices=["infonce", "infonce_no_batch_neg", "infonce_no_hard_neg", 
-                                "mse", "triplet", "listwise", "listwise_no_batch_neg"],
-                        help="Loss function to use")
-    parser.add_argument("--temperature", type=float, default=0.1,
-                        help="Temperature for InfoNCE and listwise losses")
-    parser.add_argument("--margin", type=float, default=0.2,
-                        help="Margin for triplet loss")
-    parser.add_argument("--test-size", type=float, default=0.01,
-                        help="Proportion of data to use for testing")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed for reproducibility")
-    parser.add_argument("--eval-steps", type=int, default=None,
-                        help="Run evaluation after every N steps (default: None, evaluate only at end of training)")
-    parser.add_argument("--eval-at-zero", action="store_true",
-                        help="Run evaluation at step 0, before any training")
-    parser.add_argument("--force-regenerate", action="store_true",
-                        help="Force dataset regeneration even if it exists")
-    parser.add_argument("--no-wandb", action="store_true",
-                        help="Disable wandb logging")
+    parser = argparse.ArgumentParser(description="Train QA model with flexible dataset strategies")
+    parser.add_argument("--config", type=str, help="Path to JSON configuration file")
+    parser.add_argument("--preset", type=str, choices=list(PREDEFINED_CONFIGS.keys()),
+                       help="Use a predefined configuration preset")
+    parser.add_argument("--output", type=str, help="Override output directory")
+    parser.add_argument("--debug", action="store_true", help="Run in debug mode with minimal data")
+    parser.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     
     args = parser.parse_args()
     
-    # Create training configuration
-    config = {
-        'data_path': args.data,
-        'output_dir': args.output,
-        'batch_size': args.batch_size,
-        'epochs': args.epochs,
-        'learning_rate': args.lr,
-        'limit': args.limit,
-        'debug': args.debug,
-        'loss': args.loss,
-        'test_size': args.test_size,
-        'seed': args.seed,
-        'eval_steps': args.eval_steps,
-        'eval_at_zero': args.eval_at_zero,
-        'force_regenerate': args.force_regenerate,
-        'log_to_wandb': not args.no_wandb,
-    }
+    # Load configuration
+    if args.config:
+        print(f"Loading configuration from {args.config}")
+        config = ExperimentConfig.from_file(args.config)
+    elif args.preset:
+        print(f"Using preset configuration: {args.preset}")
+        config = PREDEFINED_CONFIGS[args.preset]
+    else:
+        print("Using default configuration")
+        config = ExperimentConfig()
     
-    # Add loss-specific parameters
-    loss_kwargs = {}
-    if args.loss.startswith('infonce'):
-        loss_kwargs['temperature'] = args.temperature
-    elif args.loss == 'triplet':
-        loss_kwargs['margin'] = args.margin
-    elif args.loss.startswith('listwise'):
-        loss_kwargs['temperature'] = args.temperature
-    
-    config['loss_kwargs'] = loss_kwargs
-    
-    # If debug mode, limit samples
+    # Override configuration with command line arguments
+    if args.output:
+        config.output_dir = args.output
     if args.debug:
-        config['limit'] = min(config.get('limit', 1000), 50)
+        config.debug = True
+    if args.no_wandb:
+        config.log_to_wandb = False
     
     # Train model
     model, metrics = train_model(config)
     
     print("\nTraining complete!")
     print(f"Best metrics: {metrics}")
+
 
 if __name__ == "__main__":
     main()
