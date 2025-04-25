@@ -12,6 +12,7 @@ import torch
 import torch.optim as optim
 import wandb
 import json
+import random
 from tqdm import tqdm
 from transformers import DistilBertTokenizerFast
 
@@ -74,10 +75,17 @@ def train_epoch(model, dataloader, loss_fn, optimizer, device, epoch, config,
     batch_times = []
     start_time = time.time()
     
-    # Global step counter
+    # Global step counter and doc counter
     global_step = step_offset
+    cumulative_docs = 0
     
-    for batch_idx, batch in enumerate(progress_bar):
+    for batch_idx, batch_data in enumerate(progress_bar):
+        # Extract batch and document count
+        if isinstance(batch_data, tuple) and len(batch_data) == 2:
+            batch, cumulative_docs = batch_data
+        else:
+            batch = batch_data
+        
         # Update global step
         global_step += 1
         
@@ -225,6 +233,8 @@ def train_epoch(model, dataloader, loss_fn, optimizer, device, epoch, config,
         batch_metrics_log = {f"batch/{k}": v for k, v in batch_metrics.items()}
         batch_metrics_log["batch/loss"] = loss.item()
         batch_metrics_log["global_step"] = global_step
+        batch_metrics_log["cumulative_docs_seen"] = cumulative_docs
+        batch_metrics_log["docs_per_step"] = cumulative_docs / max(global_step, 1)
         
         # Calculate batch time
         batch_time = time.time() - batch_start
@@ -372,7 +382,31 @@ def train_model(config: ExperimentConfig):
         # Get batch transform function
         batch_transform_fn = get_batch_transform(config.batch_transform)
         
-        # Create flexible dataset
+        # Load all data
+        with open(data_path, 'r') as f:
+            all_data = json.load(f)
+        
+        # Split data based on test size
+        num_items = len(all_data)
+        test_size = config.test_size
+        test_count = int(num_items * test_size)
+        
+        # Create indices and shuffle
+        indices = list(range(num_items))
+        random.seed(config.seed)  # Use seed for reproducibility
+        random.shuffle(indices)
+        
+        # Split indices
+        test_indices = indices[:test_count]
+        train_indices = indices[test_count:]
+        
+        # Create train and test datasets
+        train_data = [all_data[i] for i in train_indices]
+        test_data = [all_data[i] for i in test_indices]
+        
+        print(f"Splitting dataset: {len(train_data)} training samples, {len(test_data)} test samples")
+        
+        # Create flexible dataset for training
         print("Creating flexible dataset")
         dataset = FlexibleQADataset(
             data_path=data_path,
@@ -382,22 +416,32 @@ def train_model(config: ExperimentConfig):
             max_length=128,
             **config.get_batch_transform_kwargs()
         )
+        # Override raw data with train split
+        dataset.raw_data = train_data
+        # Recreate batches with train data
+        dataset.batches = dataset._create_batches()
         
-        # Create dataloader (note: batch_size=1 since dataset already returns batches
-        # )
+        # Create dataloader
         print("Creating train dataloader")
         train_loader = FlexibleQADataset.get_dataloader(dataset, shuffle=True)
         
-        # Create test dataset with same transform but smaller batch size
-        print("Creating test dataset")
+        # Create standardized test dataset that's consistent across all training methods
+        print("Creating standardized test dataset")
+        # Always use the standardized test transform regardless of training strategy
+        test_transform_fn = get_batch_transform("standardized_test")
+        test_batch_size = min(len(test_data), config.get_batch_size() * 4)  # Use larger batches for testing
+        
         test_dataset = FlexibleQADataset(
             data_path=data_path,
-            batch_transform_fn=batch_transform_fn,
-            batch_size=min(config.get_batch_size(), 8),  # Smaller batch for testing
+            batch_transform_fn=test_transform_fn,
+            batch_size=test_batch_size,
             tokenizer=tokenizer,
-            max_length=128,
-            **config.get_batch_transform_kwargs()
+            max_length=128
         )
+        # Override raw data with test split
+        test_dataset.raw_data = test_data
+        # Recreate batches with test data
+        test_dataset.batches = test_dataset._create_batches()
         
         test_loader = FlexibleQADataset.get_dataloader(test_dataset, shuffle=False)
         

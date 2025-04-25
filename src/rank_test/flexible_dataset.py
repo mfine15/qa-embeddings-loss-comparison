@@ -78,20 +78,32 @@ class FlexibleQADataset(Dataset):
             random.shuffle(indices)
         
         batches = []
+        total_docs = 0
+        
         for i in trange(0, num_items, self.batch_size, desc="Creating batches"):
             batch_indices = indices[i:i+self.batch_size]
             batch_data = [self.raw_data[idx] for idx in batch_indices]
             
             # Apply the transform to create model-ready batch
-            processed_batch = self.batch_transform_fn(
+            result = self.batch_transform_fn(
                 batch_data, 
                 self.tokenizer, 
                 self.max_length, 
                 **self.kwargs
             )
             
+            # Handle return value (either just batch or batch with doc count)
+            if isinstance(result, tuple) and len(result) == 2:
+                processed_batch, batch_docs = result
+                total_docs += batch_docs
+            else:
+                processed_batch = result
+                # Estimate docs if not provided (backward compatibility)
+                total_docs += len(batch_data) * 2  # Rough estimate: 1 question + 1 answer per item
+            
             if processed_batch:  # Skip empty batches
-                batches.append(processed_batch)
+                # Store batch with cumulative doc count
+                batches.append((processed_batch, total_docs))
                 
         return batches
     
@@ -100,7 +112,7 @@ class FlexibleQADataset(Dataset):
         return len(self.batches)
         
     def __getitem__(self, idx):
-        """Return a pre-processed batch"""
+        """Return a pre-processed batch with document count"""
         return self.batches[idx]
     
     @staticmethod
@@ -137,7 +149,7 @@ def infonce_batch_transform(
         take_top: If True, use the highest-ranked answer, otherwise random
         
     Returns:
-        Batch dictionary with tokenized inputs
+        Tuple of (batch dictionary with tokenized inputs, document count)
     """
     # Collect all texts first
     questions_to_tokenize = []
@@ -146,6 +158,9 @@ def infonce_batch_transform(
     answer_ids = []
     scores = []
     ranks = []
+    
+    # Document counter
+    doc_count = 0
     
     for item in batch_data:
         question = item['question']
@@ -174,9 +189,12 @@ def infonce_batch_transform(
         answer_ids.append(selected_answer['id'])
         scores.append(float(selected_answer['score']))
         ranks.append(rank)
+        
+        # Count documents (1 question + 1 answer)
+        doc_count += 2
     
     if not questions_to_tokenize:
-        return None
+        return None, 0
         
     # Batch tokenize questions
     q_encodings = tokenizer(
@@ -208,7 +226,7 @@ def infonce_batch_transform(
         'ranks': torch.tensor(ranks, dtype=torch.long)
     }
     
-    return batch
+    return batch, doc_count
 
 
 def multiple_positives_batch_transform(
@@ -232,12 +250,15 @@ def multiple_positives_batch_transform(
         pos_count: Maximum number of positive answers to include per question
         
     Returns:
-        Batch dictionary with tokenized inputs
+        Tuple of (batch dictionary with tokenized inputs, document count)
     """
     q_input_ids, q_attention_mask = [], []
     a_input_ids, a_attention_mask = [], []
     question_ids, answer_ids = [], []
     scores, ranks = [], []
+    
+    # Document counter
+    doc_count = 0
     
     for item in batch_data:
         question = item['question']
@@ -253,6 +274,9 @@ def multiple_positives_batch_transform(
         
         # Take top K answers as positives (or fewer if not enough answers)
         positives = sorted_answers[:min(pos_count, len(sorted_answers))]
+        
+        # Count documents (1 question + N answers)
+        doc_count += 1 + len(positives)
             
         # For each positive answer
         for rank, answer in enumerate(positives):
@@ -275,7 +299,7 @@ def multiple_positives_batch_transform(
             ranks.append(rank)                    # Ordinal rank (position)
     
     if not q_input_ids:
-        return None
+        return None, 0
         
     # Create final batch
     batch = {
@@ -289,7 +313,7 @@ def multiple_positives_batch_transform(
         'ranks': torch.tensor(ranks, dtype=torch.long)       # Ordinal ranks
     }
     
-    return batch
+    return batch, doc_count
 
 
 def hard_negative_batch_transform(
@@ -573,6 +597,120 @@ def listwise_batch_transform(
     return batch_items
 
 
+def standardized_test_transform(
+    batch_data: List[Dict], 
+    tokenizer, 
+    max_length: int,
+    **kwargs
+) -> Dict:
+    """
+    Creates a standardized test batch with positive, hard negative, and 
+    normal negative samples for each question.
+    
+    This test transform is strategy-agnostic and provides consistent
+    evaluation across all training approaches.
+    
+    Args:
+        batch_data: List of raw data items with questions and ranked answers
+        tokenizer: Tokenizer for processing text
+        max_length: Maximum sequence length
+        
+    Returns:
+        Batch dictionary with tokenized inputs for standardized evaluation
+    """
+    test_items = []
+    
+    for item in batch_data:
+        question = item['question']
+        q_id = question['id']
+        q_text = question['title'] + " " + clean_html(question['body'])
+        
+        # Get all answers for this question, sorted by score
+        answers = item['answers']
+        if len(answers) < 2:
+            continue
+            
+        sorted_answers = sorted(answers, key=lambda a: float(a['score']), reverse=True)
+        
+        # Tokenize question
+        q_encoding = tokenizer(q_text, max_length=max_length, 
+                             padding='max_length', truncation=True, return_tensors='pt')
+        
+        # Get all answers
+        all_answers = []
+        
+        # Top answer is positive
+        if sorted_answers:
+            pos_answer = sorted_answers[0]
+            pos_text = clean_html(pos_answer['body'])
+            pos_encoding = tokenizer(pos_text, max_length=max_length, 
+                                  padding='max_length', truncation=True, return_tensors='pt')
+            
+            all_answers.append({
+                'input_ids': pos_encoding['input_ids'].squeeze(0),
+                'attention_mask': pos_encoding['attention_mask'].squeeze(0),
+                'score': float(pos_answer['score']),
+                'rank': 0,
+                'answer_id': pos_answer['id'],
+                'is_positive': True,
+                'is_hard_negative': False
+            })
+        
+        # Add hard negatives (lower-ranked answers to same question)
+        for i, answer in enumerate(sorted_answers[1:min(6, len(sorted_answers))]):  # Up to 5 hard negatives
+            a_text = clean_html(answer['body'])
+            a_encoding = tokenizer(a_text, max_length=max_length, 
+                                padding='max_length', truncation=True, return_tensors='pt')
+            
+            all_answers.append({
+                'input_ids': a_encoding['input_ids'].squeeze(0),
+                'attention_mask': a_encoding['attention_mask'].squeeze(0),
+                'score': float(answer['score']),
+                'rank': i+1,
+                'answer_id': answer['id'],
+                'is_positive': False,
+                'is_hard_negative': True
+            })
+        
+        # Add test item
+        test_items.append({
+            'q_input_ids': q_encoding['input_ids'].squeeze(0),
+            'q_attention_mask': q_encoding['attention_mask'].squeeze(0),
+            'question_id': q_id,
+            'answers': all_answers
+        })
+    
+    # For batch-level negative sampling, add answers from other questions
+    # as normal negatives to each question's answer pool
+    for i, item in enumerate(test_items):
+        for j, other_item in enumerate(test_items):
+            if i != j:  # Different question
+                # Add top answer from other question as a normal negative
+                other_answers = other_item['answers']
+                if other_answers:
+                    other_top = other_answers[0]  # Top answer
+                    
+                    # Add to this question's answer pool
+                    item['answers'].append({
+                        'input_ids': other_top['input_ids'],
+                        'attention_mask': other_top['attention_mask'],
+                        'score': 0.0,  # Lower score for negatives
+                        'rank': 999,  # High rank for negatives
+                        'answer_id': other_top.get('answer_id', 'unknown'),
+                        'is_positive': False,
+                        'is_hard_negative': False,
+                        'from_question_id': other_item['question_id']
+                    })
+    
+    # Count documents - for eval we don't track this as closely
+    doc_count = 0
+    for item in test_items:
+        # One question + all its answers
+        doc_count += 1 + len(item['answers'])
+    
+    return test_items, doc_count
+
+
 # Factory function to get the transform function by name
 def get_batch_transform(transform_name: str) -> Callable:
     """
@@ -593,6 +731,7 @@ def get_batch_transform(transform_name: str) -> Callable:
         'hard_negative': hard_negative_batch_transform,
         'triplet': triplet_batch_transform,
         'listwise': listwise_batch_transform,
+        'standardized_test': standardized_test_transform
     }
     
     if transform_name not in transforms:

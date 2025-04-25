@@ -87,12 +87,201 @@ def mrr(relevances):
     else:
         return 0.0
 
+def evaluate_standardized_test(model, test_dataloader, device, k_values=[1, 5, 10], debug_output=False):
+    """
+    Evaluate model with standardized test format that includes positive, hard negative,
+    and normal negative answers for each question.
+    
+    Args:
+        model: QAEmbeddingModel
+        test_dataloader: DataLoader with standardized test data
+        device: Device to run evaluation on
+        k_values: List of k values for @k metrics
+        debug_output: Whether to print detailed debug information
+        
+    Returns:
+        Dictionary of evaluation metrics
+    """
+    model.eval()
+    
+    # Initialize metrics
+    metrics = {
+        # Overall metrics (all answers)
+        'mrr': 0.0,
+        'accuracy@1': 0.0,
+        
+        # In-batch negative metrics (ignoring hard negatives)
+        'mrr_in_batch': 0.0,
+        'accuracy@1_in_batch': 0.0,
+        
+        # Hard negative metrics (only answers for same question)
+        'mrr_hard_neg': 0.0,
+        'accuracy@1_hard_neg': 0.0,
+    }
+    
+    for k in k_values:
+        metrics[f'ndcg@{k}'] = 0.0
+        metrics[f'map@{k}'] = 0.0
+    
+    # Track per-query metrics for calculating std. dev.
+    per_query_metrics = {
+        'mrr': [],
+        'mrr_in_batch': [],
+        'mrr_hard_neg': [],
+    }
+    
+    for k in k_values:
+        per_query_metrics[f'ndcg@{k}'] = []
+        per_query_metrics[f'map@{k}'] = []
+    
+    total_questions = 0
+    hard_neg_questions = 0
+    
+    # Process each batch
+    with torch.no_grad():
+        for batch_data in tqdm(test_dataloader, desc="Calculating embeddings"):
+            if isinstance(batch_data, tuple):
+                batch, _ = batch_data
+            else:
+                batch = batch_data
+                
+            for item in batch:
+                # Skip items without answers
+                if 'answers' not in item or not item['answers']:
+                    continue
+                
+                total_questions += 1
+                
+                # Calculate question embedding
+                q_embedding = model(
+                    item['q_input_ids'].unsqueeze(0).to(device),
+                    item['q_attention_mask'].unsqueeze(0).to(device)
+                )
+                
+                # Process all answers for this question
+                answers = item['answers']
+                all_similarities = []
+                has_hard_negative = False
+                
+                # Get embeddings and metadata for each answer
+                for answer in answers:
+                    # Calculate answer embedding
+                    a_embedding = model(
+                        answer['input_ids'].unsqueeze(0).to(device),
+                        answer['attention_mask'].unsqueeze(0).to(device)
+                    )
+                    
+                    # Calculate similarity
+                    similarity = torch.matmul(q_embedding, a_embedding.t()).item()
+                    
+                    # Store similarity with metadata
+                    all_similarities.append({
+                        'similarity': similarity,
+                        'is_positive': answer['is_positive'],
+                        'is_hard_negative': answer.get('is_hard_negative', False),
+                        'score': answer['score'],
+                        'rank': answer['rank']
+                    })
+                    
+                    # Check if this is a hard negative
+                    if answer.get('is_hard_negative', False):
+                        has_hard_negative = True
+                
+                if has_hard_negative:
+                    hard_neg_questions += 1
+                
+                # Sort by similarity (descending)
+                all_similarities.sort(key=lambda x: x['similarity'], reverse=True)
+                
+                # Create binary relevance array (1 for positive, 0 for negative)
+                relevance = [1 if a['is_positive'] else 0 for a in all_similarities]
+                
+                # 1. Overall evaluation (all answers)
+                # Calculate MRR
+                query_mrr = mrr(relevance)
+                metrics['mrr'] += query_mrr
+                per_query_metrics['mrr'].append(query_mrr)
+                
+                # Calculate accuracy@1
+                metrics['accuracy@1'] += 1.0 if relevance[0] == 1 else 0.0
+                
+                # Calculate NDCG@k and MAP@k
+                for k in k_values:
+                    query_ndcg = ndcg_at_k(relevance, k)
+                    query_map = map_at_k(relevance, k)
+                    
+                    metrics[f'ndcg@{k}'] += query_ndcg
+                    metrics[f'map@{k}'] += query_map
+                    
+                    per_query_metrics[f'ndcg@{k}'].append(query_ndcg)
+                    per_query_metrics[f'map@{k}'].append(query_map)
+                
+                # 2. In-batch evaluation (exclude hard negatives)
+                in_batch_sims = [a for a in all_similarities if not a.get('is_hard_negative', False)]
+                in_batch_relevance = [1 if a['is_positive'] else 0 for a in in_batch_sims]
+                
+                # Calculate MRR for in-batch
+                query_mrr_in_batch = mrr(in_batch_relevance)
+                metrics['mrr_in_batch'] += query_mrr_in_batch
+                per_query_metrics['mrr_in_batch'].append(query_mrr_in_batch)
+                
+                # Calculate accuracy@1 for in-batch
+                metrics['accuracy@1_in_batch'] += 1.0 if in_batch_relevance and in_batch_relevance[0] == 1 else 0.0
+                
+                # 3. Hard negative evaluation (only for questions with hard negatives)
+                if has_hard_negative:
+                    # Include only the positive and hard negative answers
+                    hard_neg_sims = [a for a in all_similarities if a['is_positive'] or a.get('is_hard_negative', False)]
+                    hard_neg_relevance = [1 if a['is_positive'] else 0 for a in hard_neg_sims]
+                    
+                    # Calculate MRR for hard negatives
+                    query_mrr_hard_neg = mrr(hard_neg_relevance)
+                    metrics['mrr_hard_neg'] += query_mrr_hard_neg
+                    per_query_metrics['mrr_hard_neg'].append(query_mrr_hard_neg)
+                    
+                    # Calculate accuracy@1 for hard negatives
+                    metrics['accuracy@1_hard_neg'] += 1.0 if hard_neg_relevance and hard_neg_relevance[0] == 1 else 0.0
+    
+    # Average metrics
+    if total_questions > 0:
+        # Average overall and in-batch metrics
+        for key in metrics:
+            if key not in ['mrr_hard_neg', 'accuracy@1_hard_neg']:
+                metrics[key] /= total_questions
+    
+    # Average hard negative metrics
+    if hard_neg_questions > 0:
+        metrics['mrr_hard_neg'] /= hard_neg_questions
+        metrics['accuracy@1_hard_neg'] /= hard_neg_questions
+    
+    # Calculate standard deviations
+    for key in per_query_metrics:
+        if per_query_metrics[key]:
+            metrics[f'{key}_std'] = np.std(per_query_metrics[key])
+        else:
+            metrics[f'{key}_std'] = 0.0
+    
+    # Print debug info if requested
+    if debug_output:
+        print(f"Total questions evaluated: {total_questions}")
+        print(f"Questions with hard negatives: {hard_neg_questions}")
+        
+        print("\nMetrics summary:")
+        print(f"Overall MRR: {metrics['mrr']:.4f}")
+        print(f"In-batch MRR: {metrics['mrr_in_batch']:.4f}")
+        print(f"Hard negative MRR: {metrics['mrr_hard_neg']:.4f}")
+        
+        print(f"Overall accuracy@1: {metrics['accuracy@1']:.4f}")
+        print(f"In-batch accuracy@1: {metrics['accuracy@1_in_batch']:.4f}")
+        print(f"Hard negative accuracy@1: {metrics['accuracy@1_hard_neg']:.4f}")
+    
+    return metrics
+
+
 def evaluate_model(model, test_dataloader, device, k_values=[1, 5, 10], debug_output=False):
     """
-    Evaluate model performance on test data with three accuracy types:
-    1. Overall accuracy - considering all answers in the test set
-    2. In-batch negative accuracy - ignoring hard negatives from same question
-    3. Hard negative accuracy - only comparing with answers to the same question
+    Smart evaluation function that detects the test dataloader format and 
+    uses the appropriate evaluation strategy.
     
     Args:
         model: QAEmbeddingModel
@@ -104,6 +293,21 @@ def evaluate_model(model, test_dataloader, device, k_values=[1, 5, 10], debug_ou
     Returns:
         Dictionary of evaluation metrics
     """
+    # Check the first batch to determine the format
+    for batch_data in test_dataloader:
+        # Extract batch if it comes with document count
+        if isinstance(batch_data, tuple) and len(batch_data) == 2:
+            batch = batch_data[0]
+        else:
+            batch = batch_data
+            
+        # Check if this is a standardized test batch
+        if isinstance(batch, list) and 'answers' in batch[0] and isinstance(batch[0]['answers'], list):
+            return evaluate_standardized_test(model, test_dataloader, device, k_values, debug_output)
+            
+        break  # Only need to check first batch
+        
+    # Default to original implementation for backward compatibility
     model.eval()
     
     # Collect all embeddings, relevance scores, and question IDs
@@ -118,7 +322,13 @@ def evaluate_model(model, test_dataloader, device, k_values=[1, 5, 10], debug_ou
     with torch.no_grad():
         start_idx = 0  # Track the absolute index in the final concatenated tensor
         
-        for batch_idx, batch in enumerate(tqdm(test_dataloader, desc="Calculating embeddings")):
+        for batch_idx, batch_data in enumerate(tqdm(test_dataloader, desc="Calculating embeddings")):
+            # Extract batch if it comes with document count
+            if isinstance(batch_data, tuple) and len(batch_data) == 2:
+                batch = batch_data[0]
+            else:
+                batch = batch_data
+                
             # Get embeddings
             q_embeddings = model(batch['q_input_ids'].to(device), 
                                 batch['q_attention_mask'].to(device))
@@ -135,6 +345,8 @@ def evaluate_model(model, test_dataloader, device, k_values=[1, 5, 10], debug_ou
             # Use question_id from batch, or create dummy IDs if not available
             if 'question_id' in batch:
                 q_ids = batch['question_id']
+            elif 'question_ids' in batch:
+                q_ids = batch['question_ids']
             else:
                 q_ids = [f"batch{batch_idx}_item{i}" for i in range(batch_size)]
                 
