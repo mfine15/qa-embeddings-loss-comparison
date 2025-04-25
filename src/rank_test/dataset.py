@@ -16,7 +16,7 @@ import sys
 from collections import defaultdict
 from typing import Callable
 from torch.utils.data import Dataset, DataLoader
-from tqdm import tqdm, trange
+from tqdm import tqdm
 from transformers import DistilBertTokenizerFast
 
 
@@ -78,32 +78,48 @@ class QADataset(Dataset):
         batches = []
         print(f"Creating {len(indices)} batches of size {self.batch_size}")
         print(f"Using tokenizer: {self.tokenizer}")
+        from multiprocessing import Pool
         
-        for i in trange(0, num_items, self.batch_size, desc="Creating batches"):
-            batch_indices = indices[i:i+self.batch_size]
-            batch_data = [self.raw_data[idx] for idx in batch_indices]
+        # Create list of batch indices
+        batch_indices = [
+            indices[i:i+self.batch_size] 
+            for i in range(0, num_items, self.batch_size)
+        ]
+        
+        # Function to process a single batch
+        def process_batch(batch_idx):
+            batch_data = [self.raw_data[idx] for idx in batch_idx]
             
             # Apply the transform to create model-ready batch
             result = self.batch_transform_fn(
-                batch_data, 
-                self.tokenizer, 
-                self.max_length, 
+                batch_data,
+                self.tokenizer,
+                self.max_length,
                 **self.kwargs
             )
             
-            # Handle return value (either just batch or batch with doc count)
+            # Handle return value (either just batch or doc count)
             if isinstance(result, tuple) and len(result) == 2:
                 processed_batch, batch_docs = result
             else:
                 processed_batch = result
-                # Estimate docs if not provided (backward compatibility)
+                # Estimate docs if not provided (backward compatibility) 
                 batch_docs = len(batch_data) * 2  # Rough estimate: 1 question + 1 answer per item
-            
-            if processed_batch:  # Skip empty batches
-                # Store batch with its individual doc count (not cumulative)
-                batches.append((processed_batch, batch_docs))
                 
-        return batches
+            if processed_batch:  # Skip empty batches
+                return (processed_batch, batch_docs)
+            return None
+            
+        # Process batches in parallel with progress bar
+        with Pool() as pool:
+            results = list(tqdm(
+                pool.imap(process_batch, batch_indices),
+                total=len(batch_indices),
+                desc="Creating batches"
+            ))
+            
+        # Filter out None results and return
+        return [r for r in results if r is not None]
     
     def __len__(self):
         """Return number of batches"""
