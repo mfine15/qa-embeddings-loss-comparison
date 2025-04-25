@@ -7,7 +7,7 @@ Test script for the simplified training module.
 
 import torch
 from src.rank_test.config import ExperimentConfig
-from src.rank_test.simplified_train import train
+from src.rank_test.train import train, create_unified_loss
 
 # Configure a minimal test run
 config = ExperimentConfig(

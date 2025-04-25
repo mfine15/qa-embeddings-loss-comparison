@@ -5,14 +5,12 @@
 Fixed implementation of the evaluation code to correctly calculate hard negative accuracy metrics.
 """
 
-import json
 import os
 import torch
 import numpy as np
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 import pandas as pd
-import wandb
 from collections import defaultdict
 
 def ndcg_at_k(relevances, k):
@@ -254,13 +252,7 @@ def evaluate_standardized_test(model, test_dataloader, device, k_values=[1, 5, 1
         metrics['mrr_hard_neg'] /= hard_neg_questions
         metrics['accuracy@1_hard_neg'] /= hard_neg_questions
     
-    # Calculate standard deviations
-    for key in per_query_metrics:
-        if per_query_metrics[key]:
-            metrics[f'{key}_std'] = np.std(per_query_metrics[key])
-        else:
-            metrics[f'{key}_std'] = 0.0
-    
+
     # Print debug info if requested
     if debug_output:
         print(f"Total questions evaluated: {total_questions}")

@@ -58,6 +58,179 @@ uv run rank-test --config configs/test.json
 
 To create a custom configuration, you can copy and modify one of the existing configuration files in `configs/`.
 
+## 🛰️  How a Sample Moves Through the System
+
+```mermaid
+graph LR
+    subgraph Data‐Preparation
+        A[Raw JSON QA<br/>(+ scores)] --> B[Batch Transform<br/>(e.g. infonce)]
+    end
+    B --> C[PyTorch DataLoader] --> D[Encoder (Model)] --> E[Loss Function] --> F[Metrics & Logging]
+```
+
+Shape convention: `N` = questions in the batch  
+`M_q` = positives for question `q`  
+`d` = embedding dimension (default 128)
+
+| Transform | Returned keys (main) | Shapes |
+|-----------|----------------------|--------|
+| `infonce` | `q_input_ids`, `a_input_ids` | `(N, L)`, `(N, L)` |
+| `multiple_positives` | `q_input_ids`, `a_input_ids`, `ranks`, `scores` | `(~N·M, L)` |
+| `hard_negative` | *list* of dicts, each with `answers` list | variable |
+| `triplet` | `q_input_ids`, `a_pos_input_ids`, `a_neg_input_ids` | `(N, L)` each |
+| `listwise` | *list* of dicts (`a_input_ids` is `(≤max_answers, L)`) | variable |
+| `standardized_test` | fixed evaluation format (see `transforms.standardized_test_transform`) | variable |
+
+(L = token sequence length after padding/truncation.)
+
+## 🔍  Detailed Sampling Strategies
+
+<details>
+<summary><strong>1. InfoNCE (`infonce_batch_transform`)</strong></summary>
+
+**Intuition** – One positive per question, all other answers in the same mini-batch act as negatives (classic SimCLR / CLIP style).
+
+```python
+from rank_test.flexible_dataset import FlexibleQADataset, infonce_batch_transform
+dataset = FlexibleQADataset(
+    "data/ranked_qa.json",
+    batch_transform_fn=infonce_batch_transform,
+    batch_size=8,           # provides 7 in-batch negatives per sample
+    take_top=True
+)
+batch = dataset[0]
+print(batch.keys())
+# dict_keys([... 'q_input_ids', 'a_input_ids', 'ranks', 'scores'])
+```
+
+Pros 👉 fastest, no extra memory.  
+Cons 👉 treats other good answers from the *same* question as negatives (can be harmful).
+
+Best paired with: `StandardInfoNCELoss`, `RankInfoNCELoss`.
+</details>
+
+<details>
+<summary><strong>2. Multiple Positives (`multiple_positives_batch_transform`)</strong></summary>
+
+Creates **M duplicates** of each question – one for each high-scoring answer.
+
+```
+Q           A⁺₁
+└──copy──►  A⁺₂
+            …
+```
+
+Returned batch length ≈ `Σ_q M_q`.
+
+Useful when you have several "correct" answers and want the model to learn *relative* quality (rank/score).  
+Pairs naturally with `RankInfoNCELoss` "rank" or "score" flavours and `MultiplePositivesLoss`.
+</details>
+
+<details>
+<summary><strong>3. Hard Negative (`hard_negative_batch_transform`)</strong></summary>
+
+Each item contains one question and **all** of its answers (top answer + hard negatives).  
+The loss can explicitly penalise high similarity between the question and the *wrong* answers of the same question.
+
+```python
+item = batch_items[0]
+item.keys()          # ['q_input_ids', 'answers', 'question_id', ...]
+len(item['answers']) # e.g. 5
+```
+
+Combine with `HardNegativeInfoNCELoss`.
+</details>
+
+<details>
+<summary><strong>4. Triplet (`triplet_batch_transform`)</strong></summary>
+
+Outputs three tensors per sample (query, positive, negative).  
+Negative can be "hard" (same question) or "in-batch" (different question) depending on `neg_strategy`.
+
+Pairs with `TripletLoss (margin)`.
+</details>
+
+<details>
+<summary><strong>5. Listwise (`listwise_batch_transform`)</strong></summary>
+
+Delivers **a list of answers per query** (≤ `max_answers`) plus their normalised scores → enables true listwise ranking losses.
+
+Pairs with `ListwiseRankingLoss`.
+</details>
+
+<details>
+<summary><strong>6. Standardised Test (`standardized_test_transform`)</strong></summary>
+
+Evaluation-only transform that guarantees every question has:
+* 1 positive (top answer)  
+* up to 5 hard negatives (lower-ranked answers)  
+* normal negatives (top answers from other questions)
+
+Used automatically by `evaluate.py`.
+</details>
+
+## 🔢  Detailed Loss Functions
+
+| Loss | Formula (sketch) | Typical Inputs | Notes |
+|------|------------------|----------------|-------|
+| **StandardInfoNCELoss** | \(L=-\frac12\bigl[\log\frac{e^{s_{qq^+}/\tau}}{\sum_a e^{s_{qa}/\tau}}+\log\frac{e^{s_{aa^+}/\tau}}{\sum_q e^{s_{aq}/\tau}}\bigr]\) | `(N,d)` × `(N,d)` | Symmetric InfoNCE. |
+| **RankInfoNCELoss** | Same as above but multiplies individual similarities by rank / score weights. | needs `question_ids`, optionally `ranks`/`scores`. | `use_ranks` or `use_scores`. |
+| **HardNegativeInfoNCELoss** | \(L=L_{InfoNCE}+ \lambda\; \frac1{|H|}\sum_{(q,a^-)} e^{s_{qa^-}/\tau}\) | same as standard + `question_ids` | Penalises hard-neg pairs. |
+| **MultiplePositivesLoss** | Normalised log-softmax where *all* answers of a question are positives. | batch from `multiple_positives` | Optional rank weighting. |
+| **TripletLoss** | \(\max(0,\; s_{q,a^-}-s_{q,a^+}+m)\) | `(N,d)` triplets | Margin `m` default 0.3. |
+| **ListwiseRankingLoss** | KL-divergence between softmax(sim) and softmax(scores) | listwise batch |  Temperature controls softmax sharpness. |
+
+Example:
+
+```python
+loss_fn = RankInfoNCELoss(temperature=0.07, use_scores=True, score_weight=0.05)
+loss, metrics = loss_fn(
+    q_embeddings, a_embeddings,
+    question_ids=batch['question_ids'],
+    scores=batch['scores']
+)
+```
+
+## ⚡ Quick-start Compatibility Matrix
+
+| Transform ↓ / Loss → | InfoNCE | Rank-InfoNCE | Hard-Neg-InfoNCE | Mult-Pos | Triplet | Listwise |
+|----------------------|:-------:|:------------:|:----------------:|:--------:|:-------:|:--------:|
+| `infonce` | ✔ | ✔ | ✖ | ✖ | ✖ | ✖ |
+| `multiple_positives` | ✔ | ✔ | ✖ | ✔ | ✖ | ✖ |
+| `hard_negative` | ✖ | ✖ | ✔ | ✖ | ✖ | ✖ |
+| `triplet` | ✖ | ✖ | ✖ | ✖ | ✔ | ✖ |
+| `listwise` | ✖ | ✖ | ✖ | ✖ | ✖ | ✔ |
+| `standardized_test` | eval-only | eval-only | eval-only | eval-only | eval-only | eval-only |
+
+## 🧭 Choosing the Right Combo
+
+```mermaid
+flowchart TD
+    A[Do you have >1 good answer per question?] -->|yes| B[multiple_positives]
+    A -->|no| C[Need explicit hard negatives?]
+    C -->|yes| D[hard_negative + HardNegInfoNCE]
+    C -->|no| E[Small batches? use Triplet] --> F[triplet + TripletLoss]
+    D --> G[Otherwise] --> H[infonce + StandardInfoNCE]
+```
+
+## 🎬  Minimal End-to-End Example
+
+```python
+uv add torch transformers
+uv run examples/flexible_dataset_demo.py --data-path data/sample_qa.json
+```
+
+Outputs (truncated):
+
+```
+InfoNCE Dataset and Loss
+Created InfoNCE dataset with 1 batches
+Loss: 2.1037
+Metrics: {'loss': 2.10, 'q2a_acc': 0.25, ...}
+```
+
+Feel free to explore different flags (`--help`) to switch strategies and losses.
+
 ## Batch Transformation Strategies
 
 The system uses a flexible data processing approach with various batch transformation strategies:
@@ -79,8 +252,6 @@ Each transformation prepares data in a specific format suitable for its correspo
 - `max_answers`: Maximum number of answers to include per question in listwise format
 
 ## Loss Functions
-
-The project implements the following loss functions:
 
 ### StandardInfoNCELoss
 
