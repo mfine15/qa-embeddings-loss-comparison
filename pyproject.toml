@@ -22,10 +22,12 @@ dependencies = [
     "psutil>=5.9.0",
     "pyyaml>=6.0",
     "pytest>=8.3.5",
+    "pydargs>=0.11.0",
+    "argdantic>=1.3.3",
 ]
 
 [project.scripts]
-rank-test = "rank_test.train:main"
+rank-test = "rank_test.train:cli"
 
 [build-system]
 requires = ["hatchling"]

@@ -36,12 +36,12 @@ var/
 venv/
 ENV/
 .python-version
-
+results/
+package.json
 # Data (large files)
 data/
 *.sqlite
 *.csv
-*.json
 *.zip
 
 # Model files

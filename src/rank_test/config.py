@@ -10,14 +10,14 @@ from typing import Dict, Any, Optional, Union, Literal
 from pathlib import Path
 import json
 from pydantic import BaseModel, Field
-
+from argdantic.sources import from_file, JsonFileLoader
 # Type definitions using literals instead of enums
 DatasetStrategyType = Literal["standard", "flexible"]
 BatchTransformType = Literal["infonce", "multiple_positives", "hard_negative", "triplet", "listwise"]
 NegativeStrategyType = Literal["hard_negative", "in_batch", "mixed"]
 LossType = Literal["infonce", "rank_infonce", "relaxed_hard_neg", "triplet", "listwise", "mse"]
 
-
+@from_file(loader=JsonFileLoader)
 class ExperimentConfig(BaseModel):
     """Complete experiment configuration with flat structure"""
     # Experiment metadata

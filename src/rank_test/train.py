@@ -6,7 +6,6 @@ Simplified training module for QA ranking models.
 Provides a streamlined training process with unified loss functions.
 """
 
-import os
 import time
 import torch
 import torch.optim as optim
@@ -16,16 +15,16 @@ import random
 from tqdm import tqdm
 from transformers import DistilBertTokenizerFast
 
-from rank_test.config import ExperimentConfig, PREDEFINED_CONFIGS
+from rank_test.config import ExperimentConfig
 from rank_test.models import QAEmbeddingModel
 from rank_test.dataset import (
     QADataset, 
-    get_batch_transform,
     ensure_dataset_exists
 )
+from rank_test.transforms import get_batch_transform
 from rank_test.losses import create_unified_loss
 from rank_test.evaluate import evaluate_model
-
+from argdantic import ArgParser
 
 def get_device():
     """Get appropriate device for training"""
@@ -133,7 +132,8 @@ def create_dataloaders(config: ExperimentConfig):
     
     return train_loader, test_loader
 
-
+cli = ArgParser()
+@cli.command()
 def train(config: ExperimentConfig):
     """
     Simplified training function that uses unified loss functions
@@ -330,41 +330,5 @@ def train(config: ExperimentConfig):
     return model
 
 
-def main():
-    """Main function to run training from command line with simplified API"""
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="Train QA model with unified loss functions")
-    parser.add_argument("--config", type=str, help="Path to JSON configuration file")
-    parser.add_argument("--preset", type=str, choices=list(PREDEFINED_CONFIGS.keys()),
-                       help="Use a predefined configuration preset")
-    parser.add_argument("--debug", action="store_true", help="Run in debug mode with minimal data")
-    parser.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
-    
-    args = parser.parse_args()
-    
-    # Load configuration
-    if args.config:
-        print(f"Loading configuration from {args.config}")
-        config = ExperimentConfig.from_file(args.config)
-    elif args.preset:
-        print(f"Using preset configuration: {args.preset}")
-        config = PREDEFINED_CONFIGS[args.preset]
-    else:
-        print("Using default configuration")
-        config = ExperimentConfig()
-    
-    # Override configuration with command line arguments
-    if args.debug:
-        config.debug = True
-    if args.no_wandb:
-        config.log_to_wandb = False
-    
-    # Train model
-    model = train(config)
-    
-    print("\nTraining complete!")
-
-
 if __name__ == "__main__":
-    main()
+    cli()

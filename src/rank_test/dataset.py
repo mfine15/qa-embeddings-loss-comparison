@@ -10,17 +10,15 @@ for creating training data from ranked QA pairs.
 import json
 import os
 import random
-import torch
 import time
 import csv
 import sys
 from collections import defaultdict
-from typing import List, Dict, Callable, Tuple
+from typing import Callable
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm, trange
-from transformers import DistilBertTokenizer
+from transformers import DistilBertTokenizerFast
 
-from rank_test.transforms import clean_html, get_batch_transform
 
 class QADataset(Dataset):
     """
@@ -56,7 +54,7 @@ class QADataset(Dataset):
             self.raw_data = json.load(f)
             
         # Store tokenizer and other parameters
-        self.tokenizer = tokenizer or DistilBertTokenizer.from_pretrained('distilbert-base-uncased')
+        self.tokenizer = tokenizer or DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
         self.max_length = max_length
         
         # Use provided transform or default
@@ -178,7 +176,7 @@ def download_dataset():
         a_size = os.path.getsize("data/Answers.csv")
         # If files are reasonable size, assume they're valid
         if q_size > 10000 and a_size > 10000:
-            print(f"Found existing dataset files:")
+            print("Found existing dataset files:")
             print(f"  Questions.csv: {q_size/1_000_000:.1f} MB")
             print(f"  Answers.csv: {a_size/1_000_000:.1f} MB")
             return "data"
@@ -205,7 +203,7 @@ def download_dataset():
         if os.path.exists("data/Questions.csv") and os.path.exists("data/Answers.csv"):
             q_size = os.path.getsize("data/Questions.csv")
             a_size = os.path.getsize("data/Answers.csv")
-            print(f"Dataset files:")
+            print("Dataset files:")
             print(f"  Questions.csv: {q_size/1_000_000:.1f} MB")
             print(f"  Answers.csv: {a_size/1_000_000:.1f} MB")
             return "data"
