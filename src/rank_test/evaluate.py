@@ -287,7 +287,6 @@ def evaluate_model(model, test_dataloader, device, k_values=[1, 5, 10], debug_ou
     """
     # Check the first batch to determine the format
     for batch_data in test_dataloader:
-        print(f"Batch data: {batch_data}")
         # Extract batch if it comes with document count
         if isinstance(batch_data, tuple) and len(batch_data) == 2:
             batch = batch_data[0]

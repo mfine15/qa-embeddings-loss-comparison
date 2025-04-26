@@ -96,14 +96,21 @@ class QADataset(Dataset):
     def _create_batches(self):
         """Transform raw data into batches based on the strategy"""
         # Create mini-batches of raw data
-        num_items = len(self.raw_data)
+        raw_data = self.raw_data
+        
+        # Apply limit before batching if specified
+        if self.limit is not None:
+            raw_data = raw_data[:self.limit]
+            print(f"Limiting dataset to {self.limit} items")
+        
+        num_items = len(raw_data)
         indices = list(range(num_items))
         
         if self.shuffle:
             random.shuffle(indices)
         
         batches = []
-        print(f"Creating {len(indices)} batches of size {self.batch_size}")
+        print(f"Creating batches from {num_items} items with batch size {self.batch_size}")
         print(f"Using tokenizer: {self.tokenizer}")
         
         # Create list of batch indices
@@ -112,10 +119,12 @@ class QADataset(Dataset):
             for i in range(0, num_items, self.batch_size)
         ]
         
+        print(f"Created {len(batch_indices)} batches")
+        
         
     
         # results = process_map(process_batch, [(batch_idx, self.raw_data, self.batch_transform_fn, self.tokenizer, self.max_length, self.kwargs) for batch_idx in batch_indices], max_workers=30)
-        results = [process_batch((batch_idx, self.raw_data, self.batch_transform_fn, self.tokenizer, self.max_length, self.kwargs)) for batch_idx in tqdm(batch_indices)]
+        results = [process_batch((batch_idx, raw_data, self.batch_transform_fn, self.tokenizer, self.max_length, self.kwargs)) for batch_idx in tqdm(batch_indices)]
         # Filter out None results and return
         return [r for r in results if r is not None]
     

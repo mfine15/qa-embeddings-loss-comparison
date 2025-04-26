@@ -92,9 +92,10 @@ def create_dataloaders(config: ExperimentConfig):
         batch_size=config.get_batch_size(),
         tokenizer=tokenizer,
         max_length=128,
+        limit=config.get_limit(),
         **config.get_batch_transform_kwargs()
     )
-    # Override raw data with train split
+    # Override raw data with train split (limit will be applied inside _create_batches)
     train_dataset.raw_data = train_data
     # Recreate batches with train data
     train_dataset.batches = train_dataset._create_batches()
@@ -113,9 +114,10 @@ def create_dataloaders(config: ExperimentConfig):
         batch_transform_fn=test_transform_fn,
         batch_size=test_batch_size,
         tokenizer=tokenizer,
-        max_length=128
+        max_length=128,
+        limit=None  # Use all test data
     )
-    # Override raw data with test split
+    # Override raw data with test split (limit will be applied inside _create_batches)
     test_dataset.raw_data = test_data
     # Recreate batches with test data
     test_dataset.batches = test_dataset._create_batches()
