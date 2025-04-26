@@ -151,9 +151,9 @@ class QADataset(Dataset):
             batch_size=1,
             shuffle=shuffle,
             collate_fn=lambda x: x[0],  # Extract single batch from list
-            pin_memory=True,
-            prefetch_factor=10,
-            num_workers=5
+            # pin_memory=True,
+            # prefetch_factor=10,
+            # num_workers=5
         )
 
 def parse_from_json(data_path: str, limit: int = None) -> list:
