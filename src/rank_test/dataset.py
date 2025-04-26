@@ -15,7 +15,7 @@ import csv
 import sys
 from collections import defaultdict
 from typing import Callable
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from tqdm import tqdm
 from transformers import DistilBertTokenizerFast
 
@@ -146,12 +146,7 @@ class QADataset(Dataset):
         
         Since the dataset already returns batches, use batch_size=1
         """
-        return DataLoader(
-            dataset,
-            batch_size=1,
-            shuffle=shuffle,
-            collate_fn=lambda x: x[0]  # Extract single batch from list,
-        )
+        return dataset
 
 def parse_from_json(data_path: str, limit: int = None) -> list:
     """

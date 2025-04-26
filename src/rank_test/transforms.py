@@ -18,9 +18,7 @@ Each transformation can be used with the QADataset by setting the appropriate ba
 """
 
 import torch
-from typing import List, Dict, Callable, Tuple, Optional, Union
-from collections import defaultdict
-from tqdm import tqdm
+from typing import List, Dict, Callable, Tuple
 import re
 
 def clean_html(text: str) -> str:
@@ -119,14 +117,14 @@ def infonce_batch_transform(
     
     # Create final batch dictionary
     batch = {
-        'q_input_ids': q_encodings['input_ids'],
-        'q_attention_mask': q_encodings['attention_mask'],
-        'a_input_ids': a_encodings['input_ids'],
-        'a_attention_mask': a_encodings['attention_mask'],
+        'q_input_ids': q_encodings['input_ids'].to("cuda"),
+        'q_attention_mask': q_encodings['attention_mask'].to("cuda"),
+        'a_input_ids': a_encodings['input_ids'].to("cuda"),
+        'a_attention_mask': a_encodings['attention_mask'].to("cuda"),
         'question_ids': question_ids,
         'answer_ids': answer_ids,
-        'scores': torch.tensor(scores, dtype=torch.float32),
-        'ranks': torch.tensor(ranks, dtype=torch.long)
+        'scores': torch.tensor(scores, dtype=torch.float32).to("cuda"),
+        'ranks': torch.tensor(ranks, dtype=torch.long).to("cuda")
     }
     
     return batch, doc_count
@@ -494,7 +492,7 @@ def listwise_batch_transform(
         
         # Add to batch
         batch_items.append({
-            'q_input_ids': q_encoding['input_ids'].squeeze(0),
+            'q_input_ids': q_encoding['input_ids'].squeeze(0).to(device),
             'q_attention_mask': q_encoding['attention_mask'].squeeze(0),
             'a_input_ids': a_input_ids,
             'a_attention_masks': a_attention_masks,
