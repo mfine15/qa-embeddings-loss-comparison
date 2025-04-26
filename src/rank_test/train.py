@@ -22,7 +22,6 @@ from rank_test.dataset import QADataset, ensure_dataset_exists
 from rank_test.losses import create_unified_loss
 from rank_test.evaluate import evaluate_model
 from pydargs import parse
-from torch.utils.data import DataLoader
 
 def get_device():
     """Get appropriate device for training"""
@@ -37,10 +36,6 @@ def get_device():
         print("Using CPU (No GPU acceleration available)")
     
     return device
-
-def collate_fn(batch):
-    return batch[0]
-
 def create_dataloaders(config: ExperimentConfig):
     """
     Create train and test dataloaders based on configuration
@@ -87,8 +82,12 @@ def create_dataloaders(config: ExperimentConfig):
     train_data = [all_data[i] for i in train_indices]
     test_data = [all_data[i] for i in test_indices]
     
+    print(f"Splitting dataset: {len(train_data)} training samples, {len(test_data)} test samples")
+    
+    # Create training dataset
+    print("Creating training dataset")
     train_dataset = QADataset(
-        data=train_data,
+        data_path=data_path,
         batch_transform_fn=batch_transform_fn,
         batch_size=config.get_batch_size(),
         tokenizer=tokenizer,
@@ -96,9 +95,12 @@ def create_dataloaders(config: ExperimentConfig):
         **config.get_batch_transform_kwargs()
     )
     # Override raw data with train split
+    train_dataset.raw_data = train_data
+    # Recreate batches with train data
+    train_dataset.batches = train_dataset._create_batches()
     
     # Create dataloader
-    train_loader = DataLoader(train_dataset, num_workers=16, collate_fn=collate_fn, prefetch_factor=4)
+    train_loader = QADataset.get_dataloader(train_dataset, shuffle=True)
     
     # Create standardized test dataset
     print("Creating standardized test dataset")
@@ -107,14 +109,18 @@ def create_dataloaders(config: ExperimentConfig):
     test_batch_size = min(len(test_data), config.get_batch_size() * 4)  # Use larger batches for testing
     
     test_dataset = QADataset(
-        data=test_data,
+        data_path=data_path,
         batch_transform_fn=test_transform_fn,
         batch_size=test_batch_size,
         tokenizer=tokenizer,
         max_length=128
     )
-
-    test_loader = DataLoader(test_dataset, num_workers=16, collate_fn=collate_fn, prefetch_factor=4, pin_memory=True)
+    # Override raw data with test split
+    test_dataset.raw_data = test_data
+    # Recreate batches with test data
+    test_dataset.batches = test_dataset._create_batches()
+    
+    test_loader = QADataset.get_dataloader(test_dataset, shuffle=False)
     
     print(f"Created training dataset with {len(train_dataset)} batches")
     print(f"Test dataset: {len(test_dataset)} batches")
