@@ -98,7 +98,7 @@ def create_dataloaders(config: ExperimentConfig):
     # Override raw data with train split
     
     # Create dataloader
-    train_loader = DataLoader(train_dataset, batch_size=1, num_workers=16, collate_fn=collate_fn, prefetch_factor=4)
+    train_loader = DataLoader(train_dataset, num_workers=16, collate_fn=collate_fn, prefetch_factor=4)
     
     # Create standardized test dataset
     print("Creating standardized test dataset")
@@ -114,7 +114,7 @@ def create_dataloaders(config: ExperimentConfig):
         max_length=128
     )
 
-    test_loader = DataLoader(test_dataset, batch_size=1, num_workers=16, collate_fn=collate_fn, prefetch_factor=4, pin_memory=True)
+    test_loader = DataLoader(test_dataset, num_workers=16, collate_fn=collate_fn, prefetch_factor=4, pin_memory=True)
     
     print(f"Created training dataset with {len(train_dataset)} batches")
     print(f"Test dataset: {len(test_dataset)} batches")
