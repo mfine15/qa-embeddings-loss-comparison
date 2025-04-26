@@ -584,8 +584,8 @@ def standardized_test_transform(
         
         # Add test item
         test_items.append({
-            'q_input_ids': q_encoding['input_ids'].squeeze(0),
-            'q_attention_mask': q_encoding['attention_mask'].squeeze(0),
+            'q_input_ids': q_encoding['input_ids'].squeeze(0).to("cuda"),
+            'q_attention_mask': q_encoding['attention_mask'].squeeze(0).to("cuda"),
             'question_id': q_id,
             'answers': all_answers
         })
@@ -602,8 +602,8 @@ def standardized_test_transform(
                     
                     # Add to this question's answer pool
                     item['answers'].append({
-                        'input_ids': other_top['input_ids'],
-                        'attention_mask': other_top['attention_mask'],
+                        'input_ids': other_top['input_ids'].to("cuda"),
+                        'attention_mask': other_top['attention_mask'].to("cuda")    ,
                         'score': 0.0,  # Lower score for negatives
                         'rank': 999,  # High rank for negatives
                         'answer_id': other_top.get('answer_id', 'unknown'),
