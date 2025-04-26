@@ -24,6 +24,7 @@ dependencies = [
     "pytest>=8.3.5",
     "pydargs>=0.11.0",
     "argdantic>=1.3.3",
+    "datasets>=3.5.0",
 ]
 
 [project.scripts]

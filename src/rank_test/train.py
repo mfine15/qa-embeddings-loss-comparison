@@ -2,29 +2,26 @@
 # -*- coding: utf-8 -*-
 
 """
-Simplified training module for QA ranking models.
+Training module for QA ranking models using HuggingFace datasets.
 Provides a streamlined training process with unified loss functions.
 """
 
+import json
+import random
 import time
 import torch
 import torch.optim as optim
 import wandb
-import json
-import random
 from tqdm import tqdm
-from transformers import DistilBertTokenizerFast
 
 from rank_test.config import ExperimentConfig
-from rank_test.models import QAEmbeddingModel
-from rank_test.dataset import (
-    QADataset, 
-    ensure_dataset_exists
-)
+from transformers import DistilBertTokenizerFast
 from rank_test.transforms import get_batch_transform
+from rank_test.models import QAEmbeddingModel
+from rank_test.dataset import QADataset, ensure_dataset_exists
 from rank_test.losses import create_unified_loss
 from rank_test.evaluate import evaluate_model
-from argdantic import ArgParser
+from pydargs import parse
 
 def get_device():
     """Get appropriate device for training"""
@@ -39,8 +36,6 @@ def get_device():
         print("Using CPU (No GPU acceleration available)")
     
     return device
-
-
 def create_dataloaders(config: ExperimentConfig):
     """
     Create train and test dataloaders based on configuration
@@ -132,11 +127,9 @@ def create_dataloaders(config: ExperimentConfig):
     
     return train_loader, test_loader
 
-cli = ArgParser()
-@cli.command()
 def train(config: ExperimentConfig):
     """
-    Simplified training function that uses unified loss functions
+    Training function using HuggingFace datasets
     
     Args:
         config: ExperimentConfig object
@@ -144,30 +137,25 @@ def train(config: ExperimentConfig):
     Returns:
         Trained model
     """
-    # Setup device, dataset, model
+    # Setup device
     device = get_device()
     
     # Initialize wandb if enabled
     if config.log_to_wandb and wandb.run is None:
-        run_name = f"{config.loss_type}-{config.batch_transform}-{time.strftime('%Y%m%d-%H%M%S')}"
-        if config.name:
-            run_name = f"{config.name}-{time.strftime('%Y%m%d-%H%M%S')}"
-        
-        # Create a clean config for wandb logging
-        wandb_config = config.dict()
-        
+        run_name = f"{config.name}-{time.strftime('%Y%m%d-%H%M%S')}"
         wandb.init(
             project=config.wandb_project,
             name=run_name,
-            config=wandb_config
+            config=config.__dict__
         )
         
-        # Log loss parameters as a table
-        loss_kwargs = config.get_loss_kwargs()
-        if loss_kwargs:
-            loss_params = [[k, str(v)] for k, v in loss_kwargs.items()]
-            wandb.log({"loss_parameters": wandb.Table(columns=["Parameter", "Value"], 
-                                                    data=loss_params)})
+        # Log loss parameters
+        if config.get_loss_kwargs():
+            loss_params = [[k, str(v)] for k, v in config.get_loss_kwargs().items()]
+            wandb.log({"loss_parameters": wandb.Table(
+                columns=["Parameter", "Value"], 
+                data=loss_params
+            )})
     
     # Create model
     print(f"Creating model with embed_dim={config.embed_dim} and projection_dim={config.projection_dim}")
@@ -176,152 +164,75 @@ def train(config: ExperimentConfig):
         projection_dim=config.projection_dim
     ).to(device)
     
-    # Create dataset and dataloader
+    # Create dataloaders
     train_loader, test_loader = create_dataloaders(config)
     
-    # Create loss function with unified interface
+    # Create loss function
     loss_fn = create_unified_loss(config.loss_type, **config.get_loss_kwargs())
     print(f"Using loss function: {loss_fn.get_name()}")
     
     # Create optimizer
     optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate)
     
-    # Initial evaluation (if enabled)
+    # Initial evaluation
     if config.eval_at_zero and test_loader is not None:
         print("\nRunning evaluation at step 0 (initial model)...")
-        try:
-            model.eval()
-            
-            # Run evaluation
+        model.eval()
+        with torch.no_grad():
             initial_metrics = evaluate_model(model, test_loader, device)
-            
-            # Print metrics
-            print("Step 0 evaluation results:")
-            for metric_name, metric_value in initial_metrics.items():
-                if 'hard_neg' in metric_name:
-                    print(f"  {metric_name}: {metric_value:.4f}*")  # Mark fixed metrics
-                else:
-                    print(f"  {metric_name}: {metric_value:.4f}")
-            
-            # Log metrics to wandb
             if wandb.run is not None:
-                initial_metrics_log = {f"eval/{k}": v for k, v in initial_metrics.items()}
-                initial_metrics_log["step"] = 0
-                wandb.log(initial_metrics_log)
-                
-            model.train()
-        except Exception as e:
-            print(f"Error during initial evaluation: {e}")
-            model.train()
+                wandb.log({f"eval/{k}": v for k, v in initial_metrics.items()})
+        model.train()
     
     # Training loop
     global_step = 0
-    cumulative_docs = 0
+    total_docs_processed = 0
     
-    # Main training loop - epoch based with step counter
-    for epoch in range(config.get_epochs()):
-        for batch_data in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
-            # Extract batch and document count
-            batch_doc_count = 0
-            if isinstance(batch_data, tuple) and len(batch_data) == 2:
-                batch, batch_doc_count = batch_data
-            else:
-                batch = batch_data
-                batch_doc_count = len(batch) * 2  # Estimate
+    for epoch in range(config.epochs):
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
+            # Move batch to device
+            batch = {k: v.to(device) for k, v in batch.items()}
             
-            # Add batch doc count to running total
-            cumulative_docs += batch_doc_count
-            
-            # Process batch
-            model.train()
-            batch_start = time.time()
-            
-            # The key simplification: Unified interface for all loss functions
-            # Loss function handles different batch formats internally
+            # Forward pass
             loss, batch_metrics = loss_fn(model, batch, device)
             
-            # Backward pass and optimization
+            # Backward pass
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             
-            # Update global step
+            # Update counters
             global_step += 1
+            total_docs_processed += len(batch['labels'])
             
-            # Calculate batch time
-            batch_time = time.time() - batch_start
-            
-            # Log metrics for this batch
-            batch_metrics_log = {f"batch/{k}": v for k, v in batch_metrics.items()}
-            batch_metrics_log["batch/loss"] = loss.item()
-            batch_metrics_log["step"] = global_step
-            batch_metrics_log["epoch"] = epoch + 1
-            batch_metrics_log["cumulative_docs_seen"] = cumulative_docs
-            batch_metrics_log["docs_per_step"] = cumulative_docs / max(global_step, 1)
-            batch_metrics_log["batch/time"] = batch_time
-            
-            # Update progress bar with latest metrics
-            progress_desc = f"Epoch {epoch+1} | Step {global_step} | "
-            if 'acc' in batch_metrics:
-                progress_desc += f"Acc: {batch_metrics['acc']:.4f} | "
-            elif 'accuracy' in batch_metrics:
-                progress_desc += f"Acc: {batch_metrics['accuracy']:.4f} | "
-            elif 'ndcg' in batch_metrics:
-                progress_desc += f"NDCG: {batch_metrics['ndcg']:.4f} | "
-            progress_desc += f"Loss: {loss.item():.4f}"
-            
-            # Log to wandb
+            # Log metrics
             if wandb.run is not None:
-                wandb.log(batch_metrics_log)
+                metrics = {
+                    'train/loss': loss.item(),
+                    'train/step': global_step,
+                    'train/epoch': epoch + 1,
+                    'train/docs_processed': total_docs_processed,
+                    **{f'train/{k}': v for k, v in batch_metrics.items()}
+                }
+                wandb.log(metrics)
             
-            # Run evaluation if requested
-            if config.eval_steps and test_loader and global_step % config.eval_steps == 0:
-                # Temporarily switch to eval mode
+            # Evaluation
+            if config.eval_steps and global_step % config.eval_steps == 0:
                 model.eval()
-                
-                print(f"\nRunning evaluation at step {global_step}...")
-                try:
-                    # Run evaluation
-                    test_metrics = evaluate_model(model, test_loader, device)
-                    
-                    # Print metrics
-                    print(f"Step {global_step} evaluation results:")
-                    for metric_name, metric_value in test_metrics.items():
-                        if 'hard_neg' in metric_name:
-                            print(f"  {metric_name}: {metric_value:.4f}*") # Mark fixed metrics
-                        else:
-                            print(f"  {metric_name}: {metric_value:.4f}")
-                    
-                    # Log metrics
+                with torch.no_grad():
+                    eval_metrics = evaluate_model(model, test_loader, device)
                     if wandb.run is not None:
-                        test_metrics_log = {f"eval/{k}": v for k, v in test_metrics.items()}
-                        test_metrics_log["step"] = global_step
-                        wandb.log(test_metrics_log)
-                
-                except Exception as e:
-                    print(f"Error during evaluation: {e}")
-                
-                # Switch back to training mode
+                        wandb.log({f"eval/{k}": v for k, v in eval_metrics.items()})
                 model.train()
     
     # Final evaluation
     if test_loader is not None:
         print("\nRunning final evaluation...")
         model.eval()
-        final_metrics = evaluate_model(model, test_loader, device)
-        
-        # Print final metrics
-        print("\nFinal metrics:")
-        for k, v in final_metrics.items():
-            if 'hard_neg' in k:
-                print(f"  {k}: {v:.4f}*")  # Mark fixed metrics with an asterisk
-            else:
-                print(f"  {k}: {v:.4f}")
-        
-        # Log final metrics to wandb
-        if wandb.run is not None:
-            wandb.log({f"final/{k}": v for k, v in final_metrics.items()})
-            wandb.log({"step": global_step})
+        with torch.no_grad():
+            final_metrics = evaluate_model(model, test_loader, device)
+            if wandb.run is not None:
+                wandb.log({f"final/{k}": v for k, v in final_metrics.items()})
     
     # Finish wandb run
     if wandb.run is not None:
@@ -329,6 +240,9 @@ def train(config: ExperimentConfig):
     
     return model
 
+def cli():
+    config = parse(ExperimentConfig, add_config_file_argument=True)
+    train(config)
 
 if __name__ == "__main__":
     cli()

@@ -78,7 +78,6 @@ class QADataset(Dataset):
         batches = []
         print(f"Creating {len(indices)} batches of size {self.batch_size}")
         print(f"Using tokenizer: {self.tokenizer}")
-        from multiprocessing import Pool
         
         # Create list of batch indices
         batch_indices = [
@@ -110,13 +109,7 @@ class QADataset(Dataset):
                 return (processed_batch, batch_docs)
             return None
             
-        # Process batches in parallel with progress bar
-        with Pool() as pool:
-            results = list(tqdm(
-                pool.imap(process_batch, batch_indices),
-                total=len(batch_indices),
-                desc="Creating batches"
-            ))
+        results = [process_batch(batch_idx) for batch_idx in tqdm(batch_indices)]
             
         # Filter out None results and return
         return [r for r in results if r is not None]
