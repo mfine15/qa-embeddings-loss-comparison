@@ -53,7 +53,7 @@ class QADataset(Dataset):
     
     def __init__(
         self, 
-        data_path: str, 
+        data: list, 
         batch_transform_fn: Callable = None, 
         batch_size: int = 16, 
         tokenizer = None,
@@ -73,11 +73,14 @@ class QADataset(Dataset):
             max_length: Maximum sequence length for tokenization
             shuffle: Whether to shuffle data during batch creation
             limit: Maximum number of data items to use (applied before batching)
+            raw_data: Optional pre-loaded raw data (if provided, data_path is ignored)
+            create_batches: Whether to create batches immediately (defaults to True)
             **kwargs: Additional parameters for the batch transform function
         """
-        # Load raw data
-        with open(data_path, 'r') as f:
-            self.raw_data = json.load(f)
+        # Load or use provided raw data
+        self.raw_data = data
+        # with open(data_path, 'r') as f:
+        #     self.raw_data = json.load(f)
             
         # Store tokenizer and other parameters
         self.tokenizer = tokenizer or DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
@@ -90,7 +93,7 @@ class QADataset(Dataset):
         self.limit = limit
         self.kwargs = kwargs
         
-        # Pre-process into batches
+        # Pre-process into batches if requested
         self.batches = self._create_batches()
         
     def _create_batches(self):

@@ -84,10 +84,10 @@ def create_dataloaders(config: ExperimentConfig):
     
     print(f"Splitting dataset: {len(train_data)} training samples, {len(test_data)} test samples")
     
-    # Create training dataset
+    # Create training dataset directly with train data
     print("Creating training dataset")
     train_dataset = QADataset(
-        data_path=data_path,
+        data=train_data,  # Only needed for compatibility
         batch_transform_fn=batch_transform_fn,
         batch_size=config.get_batch_size(),
         tokenizer=tokenizer,
@@ -95,32 +95,25 @@ def create_dataloaders(config: ExperimentConfig):
         limit=config.get_limit(),
         **config.get_batch_transform_kwargs()
     )
-    # Override raw data with train split (limit will be applied inside _create_batches)
-    train_dataset.raw_data = train_data
-    # Recreate batches with train data
-    train_dataset.batches = train_dataset._create_batches()
+    # Create batches only once with the train data
     
     # Create dataloader
     train_loader = QADataset.get_dataloader(train_dataset, shuffle=True)
     
-    # Create standardized test dataset
+    # Create standardized test dataset directly with test data
     print("Creating standardized test dataset")
     # Always use the standardized test transform regardless of training strategy
     test_transform_fn = get_batch_transform("standardized_test")
     test_batch_size = min(len(test_data), config.get_batch_size() * 4)  # Use larger batches for testing
     
     test_dataset = QADataset(
-        data_path=data_path,
+        data=test_data,  # Only needed for compatibility
         batch_transform_fn=test_transform_fn,
         batch_size=test_batch_size,
         tokenizer=tokenizer,
         max_length=128,
-        limit=None  # Use all test data
+        limit=None,  # Use all test data
     )
-    # Override raw data with test split (limit will be applied inside _create_batches)
-    test_dataset.raw_data = test_data
-    # Recreate batches with test data
-    test_dataset.batches = test_dataset._create_batches()
     
     test_loader = QADataset.get_dataloader(test_dataset, shuffle=False)
     
