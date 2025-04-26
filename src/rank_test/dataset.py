@@ -15,9 +15,10 @@ import csv
 import sys
 from collections import defaultdict
 from typing import Callable
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from tqdm import tqdm
 from transformers import DistilBertTokenizerFast
+from rank_test.transforms import infonce_batch_transform
 
 
 class QADataset(Dataset):
@@ -29,7 +30,7 @@ class QADataset(Dataset):
     
     def __init__(
         self, 
-        data_path: str, 
+        data: list, 
         batch_transform_fn: Callable = None, 
         batch_size: int = 16, 
         tokenizer = None,
@@ -50,8 +51,7 @@ class QADataset(Dataset):
             **kwargs: Additional parameters for the batch transform function
         """
         # Load raw data
-        with open(data_path, 'r') as f:
-            self.raw_data = json.load(f)
+        self.raw_data = data
             
         # Store tokenizer and other parameters
         self.tokenizer = tokenizer or DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
@@ -63,12 +63,7 @@ class QADataset(Dataset):
         self.shuffle = shuffle
         self.kwargs = kwargs
         
-        # Pre-process into batches
-        self.batches = self._create_batches()
         
-    def _create_batches(self):
-        """Transform raw data into batches based on the strategy"""
-        # Create mini-batches of raw data
         num_items = len(self.raw_data)
         indices = list(range(num_items))
         
@@ -79,62 +74,37 @@ class QADataset(Dataset):
         print(f"Creating {len(indices)} batches of size {self.batch_size}")
         print(f"Using tokenizer: {self.tokenizer}")
         
-        # Create list of batch indices
-        batch_indices = [
-            indices[i:i+self.batch_size] 
-            for i in range(0, num_items, self.batch_size)
-        ]
-        
-        # Function to process a single batch
-        def process_batch(batch_idx):
-            batch_data = [self.raw_data[idx] for idx in batch_idx]
-            
-            # Apply the transform to create model-ready batch
-            result = self.batch_transform_fn(
-                batch_data,
-                self.tokenizer,
-                self.max_length,
-                **self.kwargs
-            )
-            
-            # Handle return value (either just batch or doc count)
-            if isinstance(result, tuple) and len(result) == 2:
-                processed_batch, batch_docs = result
-            else:
-                processed_batch = result
-                # Estimate docs if not provided (backward compatibility) 
-                batch_docs = len(batch_data) * 2  # Rough estimate: 1 question + 1 answer per item
-                
-            if processed_batch:  # Skip empty batches
-                return (processed_batch, batch_docs)
-            return None
-            
-        results = [process_batch(batch_idx) for batch_idx in tqdm(batch_indices)]
-            
-        # Filter out None results and return
-        return [r for r in results if r is not None]
+ 
     
     def __len__(self):
         """Return number of batches"""
-        return len(self.batches)
+        return len(self.raw_data)
         
     def __getitem__(self, idx):
         """Return a pre-processed batch with document count"""
-        return self.batches[idx]
-    
-    @staticmethod
-    def get_dataloader(dataset, shuffle=False):
-        """
-        Create a DataLoader for this dataset
+                # Function to process a single batch
+        batch_data = self.raw_data[idx:idx+self.batch_size]
         
-        Since the dataset already returns batches, use batch_size=1
-        """
-        return DataLoader(
-            dataset,
-            batch_size=1,
-            shuffle=shuffle,
-            collate_fn=lambda x: x[0]  # Extract single batch from list
+        # Apply the transform to create model-ready batch
+        result = self.batch_transform_fn(
+            batch_data,
+            self.tokenizer,
+            self.max_length,
+            **self.kwargs
         )
+        
+        # Handle return value (either just batch or doc count)
+        if isinstance(result, tuple) and len(result) == 2:
+            processed_batch, batch_docs = result
+        else:
+            processed_batch = result
+            # Estimate docs if not provided (backward compatibility) 
+            batch_docs = len(batch_data) * 2  # Rough estimate: 1 question + 1 answer per item
+            
+        if processed_batch:  # Skip empty batches
+            return (processed_batch, batch_docs)
+        return None
+        
 
 def parse_from_json(data_path: str, limit: int = None) -> list:
     """
