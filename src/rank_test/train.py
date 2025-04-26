@@ -191,9 +191,31 @@ def train(config: ExperimentConfig):
     total_docs_processed = 0
     
     for epoch in range(config.epochs):
-        for batch, _ in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
-            # Move batch to device
-            batch = {k: v.to(device) for k, v in batch.items()}
+        for batch_data in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
+            # Handle different possible formats from DataLoader
+            batch_docs = None
+            if isinstance(batch_data, tuple) and len(batch_data) == 2:
+                # It's (batch, docs) format
+                batch, batch_docs = batch_data
+            else:
+                # It's just the batch directly
+                batch = batch_data
+                
+            # Move tensors to device
+            if isinstance(batch, dict):
+                # Dictionary of tensors - most common format
+                batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
+                         for k, v in batch.items()}
+            elif isinstance(batch, list):
+                # List format - depends on how transforms work
+                batch = [x.to(device) if isinstance(x, torch.Tensor) else x 
+                         for x in batch]
+            elif isinstance(batch, torch.Tensor):
+                # Single tensor - rare but possible
+                batch = batch.to(device)
+            else:
+                # Unexpected format
+                raise TypeError(f"Unexpected batch type: {type(batch)}")
             # Forward pass
             loss, batch_metrics = loss_fn(model, batch, device)
             
@@ -204,7 +226,7 @@ def train(config: ExperimentConfig):
             
             # Update counters
             global_step += 1
-            total_docs_processed += len(batch['labels'])
+            total_docs_processed += len(batch['scores'])
             
             # Log metrics
             if wandb.run is not None:
