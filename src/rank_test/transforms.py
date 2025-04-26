@@ -33,6 +33,7 @@ def infonce_batch_transform(
     tokenizer, 
     max_length: int, 
     take_top: bool = True,
+    device="cpu",
     **kwargs
 ) -> Tuple[Dict, int]:
     """
@@ -117,14 +118,14 @@ def infonce_batch_transform(
     
     # Create final batch dictionary
     batch = {
-        'q_input_ids': q_encodings['input_ids'].to("cuda"),
-        'q_attention_mask': q_encodings['attention_mask'].to("cuda"),
-        'a_input_ids': a_encodings['input_ids'].to("cuda"),
-        'a_attention_mask': a_encodings['attention_mask'].to("cuda"),
+        'q_input_ids': q_encodings['input_ids'],
+        'q_attention_mask': q_encodings['attention_mask'],
+        'a_input_ids': a_encodings['input_ids'],
+        'a_attention_mask': a_encodings['attention_mask'],
         'question_ids': question_ids,
         'answer_ids': answer_ids,
-        'scores': torch.tensor(scores, dtype=torch.float32).to("cuda"),
-        'ranks': torch.tensor(ranks, dtype=torch.long).to("cuda")
+        'scores': torch.tensor(scores, dtype=torch.float32),
+        'ranks': torch.tensor(ranks, dtype=torch.long)
     }
     
     return batch, doc_count
@@ -508,6 +509,7 @@ def standardized_test_transform(
     batch_data: List[Dict], 
     tokenizer, 
     max_length: int,
+    device="cpu",
     **kwargs
 ) -> Tuple[Dict, int]:
     """
@@ -584,8 +586,8 @@ def standardized_test_transform(
         
         # Add test item
         test_items.append({
-            'q_input_ids': q_encoding['input_ids'].squeeze(0).to("cuda"),
-            'q_attention_mask': q_encoding['attention_mask'].squeeze(0).to("cuda"),
+            'q_input_ids': q_encoding['input_ids'].squeeze(0),
+            'q_attention_mask': q_encoding['attention_mask'].squeeze(0),
             'question_id': q_id,
             'answers': all_answers
         })
@@ -602,8 +604,8 @@ def standardized_test_transform(
                     
                     # Add to this question's answer pool
                     item['answers'].append({
-                        'input_ids': other_top['input_ids'].to("cuda"),
-                        'attention_mask': other_top['attention_mask'].to("cuda")    ,
+                        'input_ids': other_top['input_ids'],
+                        'attention_mask': other_top['attention_mask'],
                         'score': 0.0,  # Lower score for negatives
                         'rank': 999,  # High rank for negatives
                         'answer_id': other_top.get('answer_id', 'unknown'),

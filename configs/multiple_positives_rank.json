@@ -1,7 +1,7 @@
 {
   "name": "Multiple Positives with Rank Weighting",
   "data_path": "data/ranked_qa.json",
-  "limit": 100000,
+  "limit": 1000,
   "test_size": 0.02,
   "seed": 42,
   "embed_dim": 768,
@@ -13,7 +13,7 @@
   "eval_at_zero": true,
   "debug": false,
   "output_dir": "models/flexible",
-  "log_to_wandb": true,
+  "log_to_wandb": false,
   "dataset_strategy": "flexible",
   "batch_transform": "infonce",
   "pos_count": 3,

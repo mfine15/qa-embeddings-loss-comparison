@@ -21,7 +21,9 @@ from transformers import DistilBertTokenizerFast
 
 # Function to process a single batch
 def process_batch(args):
-    batch_idx, raw_data, batch_transform_fn, tokenizer, max_length, kwargs = args
+    """Process a single batch of data and apply the transform function"""
+    batch_idx, raw_data, batch_transform_fn, tokenizer, max_length, device, kwargs = args
+    # Gather the data for this batch
     batch_data = [raw_data[idx] for idx in batch_idx]
     
     # Apply the transform to create model-ready batch
@@ -29,6 +31,7 @@ def process_batch(args):
         batch_data,
         tokenizer,
         max_length,
+        device=device,
         **kwargs
     )
     
@@ -46,9 +49,9 @@ def process_batch(args):
 
 class QADataset(Dataset):
     """
-    Flexible QA dataset that supports various batch transformation strategies.
+    Optimized dataset that supports various batch transformation strategies.
     This dataset provides configurable approaches for creating training data
-    from ranked QA pairs for different loss functions.
+    from ranked QA pairs for different loss functions with improved performance.
     """
     
     def __init__(
@@ -60,40 +63,37 @@ class QADataset(Dataset):
         max_length: int = 128,
         shuffle: bool = True,
         limit: int = None,
+        device = "cpu",
         **kwargs
     ):
         """
         Initialize the dataset with a specific batch transformation strategy.
         
         Args:
-            data_path: Path to JSON dataset with ranked QA pairs
+            data: List of data items to process
             batch_transform_fn: Function that transforms raw data to model-ready batches
             batch_size: Batch size for pre-processing
             tokenizer: Tokenizer to use (will create DistilBERT tokenizer if None)
             max_length: Maximum sequence length for tokenization
             shuffle: Whether to shuffle data during batch creation
             limit: Maximum number of data items to use (applied before batching)
-            raw_data: Optional pre-loaded raw data (if provided, data_path is ignored)
-            create_batches: Whether to create batches immediately (defaults to True)
+            device: Device to place tensors on
             **kwargs: Additional parameters for the batch transform function
         """
-        # Load or use provided raw data
+        # Store input data
         self.raw_data = data
-        # with open(data_path, 'r') as f:
-        #     self.raw_data = json.load(f)
             
         # Store tokenizer and other parameters
         self.tokenizer = tokenizer or DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
         self.max_length = max_length
-        
-        # Use provided transform or default
-        self.batch_transform_fn = batch_transform_fn or infonce_batch_transform
+        self.batch_transform_fn = batch_transform_fn
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.limit = limit
+        self.device = device
         self.kwargs = kwargs
         
-        # Pre-process into batches if requested
+        # Process data into batches
         self.batches = self._create_batches()
         
     def _create_batches(self):

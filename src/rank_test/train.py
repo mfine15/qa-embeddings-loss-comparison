@@ -18,7 +18,7 @@ from rank_test.config import ExperimentConfig
 from transformers import DistilBertTokenizerFast
 from rank_test.transforms import get_batch_transform
 from rank_test.models import QAEmbeddingModel
-from rank_test.dataset import QADataset, ensure_dataset_exists
+from rank_test.optimized_dataset import OptimizedQADataset as QADataset, ensure_dataset_exists, parse_from_json
 from rank_test.losses import create_unified_loss
 from rank_test.evaluate import evaluate_model
 from pydargs import parse
@@ -38,7 +38,7 @@ def get_device():
     return device
 def create_dataloaders(config: ExperimentConfig):
     """
-    Create train and test dataloaders based on configuration
+    Optimized function to create train and test dataloaders.
     
     Args:
         config: ExperimentConfig object
@@ -46,6 +46,9 @@ def create_dataloaders(config: ExperimentConfig):
     Returns:
         Tuple of (train_loader, test_loader)
     """
+    start_time = time.time()
+    device = get_device()
+    
     # Ensure dataset exists
     data_path = config.data_path
     ensure_dataset_exists(
@@ -54,15 +57,15 @@ def create_dataloaders(config: ExperimentConfig):
         force_regenerate=config.force_regenerate
     )
     
-    # Create tokenizer
+    # Create tokenizer (shared between datasets)
     tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
     
-    # Get batch transform function
-    batch_transform_fn = get_batch_transform(config.batch_transform)
+    # Get batch transform functions
+    train_transform_fn = get_batch_transform(config.batch_transform)
+    test_transform_fn = get_batch_transform("standardized_test")
     
-    # Load all data
-    with open(data_path, 'r') as f:
-        all_data = json.load(f)
+    # Load data once
+    all_data = parse_from_json(data_path)
     
     # Split data based on test size
     num_items = len(all_data)
@@ -78,47 +81,46 @@ def create_dataloaders(config: ExperimentConfig):
     test_indices = indices[:test_count]
     train_indices = indices[test_count:]
     
-    # Create train and test datasets
+    # Extract train and test data
     train_data = [all_data[i] for i in train_indices]
     test_data = [all_data[i] for i in test_indices]
     
     print(f"Splitting dataset: {len(train_data)} training samples, {len(test_data)} test samples")
     
-    # Create training dataset directly with train data
+    # Create training dataset
     print("Creating training dataset")
     train_dataset = QADataset(
-        data=train_data,  # Only needed for compatibility
-        batch_transform_fn=batch_transform_fn,
+        data=train_data,
+        batch_transform_fn=train_transform_fn,
         batch_size=config.get_batch_size(),
         tokenizer=tokenizer,
         max_length=128,
         limit=config.get_limit(),
+        device=device,
         **config.get_batch_transform_kwargs()
     )
-    # Create batches only once with the train data
     
-    # Create dataloader
-    train_loader = QADataset.get_dataloader(train_dataset, shuffle=True)
-    
-    # Create standardized test dataset directly with test data
+    # Create test dataset with standardized format
     print("Creating standardized test dataset")
-    # Always use the standardized test transform regardless of training strategy
-    test_transform_fn = get_batch_transform("standardized_test")
     test_batch_size = min(len(test_data), config.get_batch_size() * 4)  # Use larger batches for testing
     
     test_dataset = QADataset(
-        data=test_data,  # Only needed for compatibility
+        data=test_data,
         batch_transform_fn=test_transform_fn,
         batch_size=test_batch_size,
         tokenizer=tokenizer,
         max_length=128,
-        limit=None,  # Use all test data
+        device=device,
+        limit=None  # Use all test data
     )
     
-    test_loader = QADataset.get_dataloader(test_dataset, shuffle=False)
+    # Get dataloaders (optimized dataset returns itself)
+    train_loader = train_dataset
+    test_loader = test_dataset
     
     print(f"Created training dataset with {len(train_dataset)} batches")
     print(f"Test dataset: {len(test_dataset)} batches")
+    print(f"Dataloader creation completed in {time.time() - start_time:.2f} seconds")
     
     return train_loader, test_loader
 
@@ -179,36 +181,25 @@ def train(config: ExperimentConfig):
                 wandb.log({f"eval/{k}": v for k, v in initial_metrics.items()})
         model.train()
     
-    # Training loop
+    # Training loop with timing
     global_step = 0
     total_docs_processed = 0
+    total_train_time = 0
     
+    print(f"Starting training for {config.epochs} epochs")
     for epoch in range(config.epochs):
-        for batch_data in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
-            # Handle different possible formats from DataLoader
-            batch_docs = None
+        epoch_start = time.time()
+        batch_times = []
+        
+        for batch_idx, batch_data in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}")):
+            batch_start = time.time()
+            
+            # Unpack batch data
             if isinstance(batch_data, tuple) and len(batch_data) == 2:
-                # It's (batch, docs) format
                 batch, batch_docs = batch_data
             else:
-                # It's just the batch directly
-                batch = batch_data
-                
-            # Move tensors to device
-            if isinstance(batch, dict):
-                # Dictionary of tensors - most common format
-                batch = {k: v.to(device) if isinstance(v, torch.Tensor) else v 
-                         for k, v in batch.items()}
-            elif isinstance(batch, list):
-                # List format - depends on how transforms work
-                batch = [x.to(device) if isinstance(x, torch.Tensor) else x 
-                         for x in batch]
-            elif isinstance(batch, torch.Tensor):
-                # Single tensor - rare but possible
-                batch = batch.to(device)
-            else:
-                # Unexpected format
-                raise TypeError(f"Unexpected batch type: {type(batch)}")
+                batch, batch_docs = batch_data, None
+            
             # Forward pass
             loss, batch_metrics = loss_fn(model, batch, device)
             
@@ -219,7 +210,7 @@ def train(config: ExperimentConfig):
             
             # Update counters
             global_step += 1
-            total_docs_processed += len(batch['scores'])
+            total_docs_processed += len(batch['scores']) if 'scores' in batch else 1
             
             # Log metrics
             if wandb.run is not None:
@@ -231,15 +222,32 @@ def train(config: ExperimentConfig):
                     **{f'train/{k}': v for k, v in batch_metrics.items()}
                 }
                 wandb.log(metrics)
+                
+            # Record timing
+            batch_end = time.time()
+            batch_time = batch_end - batch_start
+            batch_times.append(batch_time)
             
-            # Evaluation
-            if config.eval_steps and global_step % config.eval_steps == 0:
-                model.eval()
-                with torch.no_grad():
-                    eval_metrics = evaluate_model(model, test_loader, device)
-                    if wandb.run is not None:
-                        wandb.log({f"eval/{k}": v for k, v in eval_metrics.items()})
-                model.train()
+            # Print occasional timing stats
+            if batch_idx % 10 == 0 and batch_idx > 0:
+                avg_time = sum(batch_times[-10:]) / min(10, len(batch_times))
+                speed = len(batch['scores']) / avg_time if 'scores' in batch else 1/avg_time
+                print(f"  Batch {batch_idx}: {avg_time:.4f}s/batch, ~{speed:.1f} examples/s")
+        
+        # End of epoch stats
+        epoch_time = time.time() - epoch_start
+        total_train_time += epoch_time
+        avg_batch_time = sum(batch_times) / len(batch_times)
+        print(f"Epoch {epoch+1} completed in {epoch_time:.2f}s ({avg_batch_time:.4f}s/batch avg)")
+        
+        # Evaluate at the end of each epoch
+        if test_loader is not None:
+            model.eval()
+            with torch.no_grad():
+                eval_metrics = evaluate_model(model, test_loader, device)
+                if wandb.run is not None:
+                    wandb.log({f"eval/{k}": v for k, v in eval_metrics.items()})
+            model.train()
     
     # Final evaluation
     if test_loader is not None:

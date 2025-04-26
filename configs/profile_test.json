@@ -1,0 +1,21 @@
+{
+  "name": "Profile Test",
+  "data_path": "data/ranked_qa.json",
+  "limit": 500,
+  "test_size": 0.1,
+  "seed": 42,
+  "embed_dim": 768,
+  "projection_dim": 128,
+  "batch_size": 32,
+  "epochs": 1,
+  "learning_rate": 2e-5,
+  "eval_steps": 0,
+  "eval_at_zero": false,
+  "debug": false,
+  "output_dir": "models/profile",
+  "log_to_wandb": false,
+  "dataset_strategy": "flexible",
+  "batch_transform": "infonce",
+  "loss_type": "infonce",
+  "temperature": 0.1
+}
