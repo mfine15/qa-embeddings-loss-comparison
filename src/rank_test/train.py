@@ -189,10 +189,9 @@ def train(config: ExperimentConfig):
     total_docs_processed = 0
     
     for epoch in range(config.epochs):
-        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
+        for batch, _ in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
             # Move batch to device
             batch = {k: v.to(device) for k, v in batch.items()}
-            
             # Forward pass
             loss, batch_metrics = loss_fn(model, batch, device)
             

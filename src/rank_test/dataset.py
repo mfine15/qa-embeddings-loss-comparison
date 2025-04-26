@@ -59,6 +59,7 @@ class QADataset(Dataset):
         tokenizer = None,
         max_length: int = 128,
         shuffle: bool = True,
+        limit: int = None,
         **kwargs
     ):
         """
@@ -71,6 +72,7 @@ class QADataset(Dataset):
             tokenizer: Tokenizer to use (will create DistilBERT tokenizer if None)
             max_length: Maximum sequence length for tokenization
             shuffle: Whether to shuffle data during batch creation
+            limit: Maximum number of data items to use (applied before batching)
             **kwargs: Additional parameters for the batch transform function
         """
         # Load raw data
@@ -85,6 +87,7 @@ class QADataset(Dataset):
         self.batch_transform_fn = batch_transform_fn or infonce_batch_transform
         self.batch_size = batch_size
         self.shuffle = shuffle
+        self.limit = limit
         self.kwargs = kwargs
         
         # Pre-process into batches
