@@ -56,7 +56,7 @@ def run_on_dev_machine(config_file: str):
     
     # Construct the command to run in the pod
     pod_cmd = [
-        "kc", "exec", "--namespace=dev", "-it", "pod/dev-machine-0", "--", "bash",
+        "kubectl", "exec", "--namespace=dev", "-it", "pod/dev-machine-0", "--", "bash",
         "-c",
         f"cd /home/qa-embeddings-loss-comparison && "
         f"git pull && "
