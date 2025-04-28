@@ -218,7 +218,7 @@ def train(config: ExperimentConfig):
                 batches_to_process = []
                 if batch_data is None:
                     continue
-                elif isinstance(batch_data, tuple) and len(batch_data) == 2:
+                elif len(batch_data) == 2:
                     batch, batch_docs = batch_data
                     if batch is None or (isinstance(batch, (list, dict)) and len(batch) == 0):
                         continue
