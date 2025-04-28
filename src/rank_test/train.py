@@ -184,9 +184,7 @@ def train(config: ExperimentConfig):
     print(f"Starting training for {config.epochs} epochs")
     
     # Setup profiler
-    activities = [ProfilerActivity.CPU]
-    if torch.cuda.is_available():
-        activities.append(ProfilerActivity.CUDA)
+    activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
 
         
     with profile(
