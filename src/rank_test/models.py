@@ -3,7 +3,7 @@
 
 import torch.nn as nn
 from transformers import AutoModel
-
+import torch
 class QAEmbeddingModel(nn.Module):
     """
     Model for embedding questions and answers using various transformer models
@@ -12,7 +12,7 @@ class QAEmbeddingModel(nn.Module):
     def __init__(self, model_name="distilbert-base-uncased", projection_dim=128):
         super(QAEmbeddingModel, self).__init__()
         # Load pretrained model
-        self.bert = AutoModel.from_pretrained(model_name)
+        self.bert = AutoModel.from_pretrained(model_name, attn_imlementation="flash_attention_2", torch_dtype=torch.bfloat16)
         # Get embedding dimension from model
         self.embed_dim = self.bert.config.hidden_size
         # Projection layer to get embeddings of the desired dimension
