@@ -17,11 +17,12 @@ from rank_test.config import ExperimentConfig
 from transformers import AutoTokenizer
 from rank_test.transforms import get_batch_transform
 from rank_test.models import QAEmbeddingModel
-from rank_test.optimized_dataset import OptimizedQADataset as QADataset, ensure_dataset_exists, parse_from_json
+from rank_test.optimized_dataset import ensure_dataset_exists, parse_from_json
 from rank_test.losses import create_unified_loss
 from rank_test.evaluate import evaluate_model
 from pydargs import parse
 from torch.profiler import profile, record_function, ProfilerActivity, tensorboard_trace_handler
+from rank_test.async_dataloader import create_async_dataloader
 
 
 
@@ -89,39 +90,36 @@ def create_dataloaders(config: ExperimentConfig):
     
     print(f"Splitting dataset: {len(train_data)} training samples, {len(test_data)} test samples")
     
-    # Create training dataset
-    print("Creating training dataset")
-    train_dataset = QADataset(
+    # Create async DataLoader for training
+    print("Creating training dataloader (async)")
+    train_loader = create_async_dataloader(
         data=train_data,
-        batch_transform_fn=train_transform_fn,
-        batch_size=config.get_batch_size(),
+        transform_fn=train_transform_fn,
         tokenizer=tokenizer,
+        batch_size=config.get_batch_size(),
+        shuffle=True,
         max_length=128,
-        limit=config.get_limit(),
-        device=device,
+        device=str(device),
+        num_workers=4,
         **config.get_batch_transform_kwargs()
     )
     
-    # Create test dataset with standardized format
-    print("Creating standardized test dataset")
-    test_batch_size = min(len(test_data), config.get_batch_size() * 4)  # Use larger batches for testing
-    
-    test_dataset = QADataset(
+    # Create async DataLoader for testing
+    print("Creating standardized test dataloader (async)")
+    test_batch_size = min(len(test_data), config.get_batch_size() * 4)
+    test_loader = create_async_dataloader(
         data=test_data,
-        batch_transform_fn=test_transform_fn,
-        batch_size=test_batch_size,
+        transform_fn=test_transform_fn,
         tokenizer=tokenizer,
+        batch_size=test_batch_size,
+        shuffle=False,
         max_length=128,
-        device=device,
-        limit=None  # Use all test data
+        device=str(device),
+        num_workers=2,
     )
     
-    # Get dataloaders (optimized dataset returns itself)
-    train_loader = train_dataset
-    test_loader = test_dataset
-    
-    print(f"Created training dataset with {len(train_dataset)} batches")
-    print(f"Test dataset: {len(test_dataset)} batches")
+    print(f"Created training dataloader with {len(train_loader)} batches")
+    print(f"Test dataloader: {len(test_loader)} batches")
     print(f"Dataloader creation completed in {time.time() - start_time:.2f} seconds")
     
     return train_loader, test_loader
