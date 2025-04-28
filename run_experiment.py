@@ -12,6 +12,10 @@ import time
 import logging
 from pathlib import Path
 from typing import Optional
+from kubernetes import config
+from kubernetes.client import CoreV1Api
+from kubernetes.stream import stream
+
 
 # Configure logging
 logging.basicConfig(
@@ -59,27 +63,49 @@ def git_commit_and_push():
     logger.info("Git operations completed successfully")
 
 def run_on_dev_machine(config_file: str):
-    """Run the experiment on the dev machine."""
+    """Run the experiment on the dev machine using Kubernetes API."""
     logger.info(f"Running experiment with config: {config_file}")
     
+    # Load kubernetes configuration
+    try:
+        config.load_kube_config()
+    except Exception as e:
+        logger.error(f"Failed to load kubernetes config: {e}")
+        raise
+    
+    # Create API client
+    v1 = CoreV1Api()
     
     # Construct the command to run in the pod
-    pod_cmd = [
-        "kubectl", "exec", "--namespace=dev", "-it", "pod/dev-machine-0", "--", "bash",
+    command = [
+        "bash",
         "-c",
         f"cd /home/qa-embeddings-loss-comparison && "
         f"git pull && "
         f"uv run rank-test --config-file {config_file}"
     ]
     
-    # Run the command and stream output
-    process = subprocess.Popen(pod_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    for line in iter(process.stdout.readline, ''):
-        print(line, end='')
-    process.stdout.close()
-    process.wait()
-  
-    logger.info("Experiment completed successfully")
+    try:
+        # Execute command in pod
+        resp = stream(
+            v1.connect_get_namespaced_pod_exec,
+            "dev-machine-0",
+            "dev",
+            command=command,
+            stderr=True,
+            stdin=False,
+            stdout=True,
+            tty=False
+        )
+        
+        # Print output
+        print(resp)
+        
+        logger.info("Experiment completed successfully")
+        
+    except Exception as e:
+        logger.error(f"Failed to execute command in pod: {e}")
+        raise
 
 def main():
     """Main entry point."""
