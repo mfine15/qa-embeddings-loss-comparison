@@ -86,7 +86,7 @@ def run_on_dev_machine(config_file: str):
     ]
     
     try:
-        # Execute command in pod
+        # Execute command in pod with streaming
         resp = stream(
             v1.connect_get_namespaced_pod_exec,
             "dev-machine-0",
@@ -95,11 +95,20 @@ def run_on_dev_machine(config_file: str):
             stderr=True,
             stdin=False,
             stdout=True,
-            tty=False
+            tty=False,
+            _preload_content=False  # Don't preload content to enable streaming
         )
         
-        # Print output
-        print(resp)
+        # Stream the output in real-time
+        while resp.is_open():
+            resp.update(timeout=1)
+            if resp.peek_stdout():
+                print(resp.read_stdout(), end='')
+            if resp.peek_stderr():
+                print(resp.read_stderr(), end='', file=sys.stderr)
+        
+        # Close the stream
+        resp.close()
         
         logger.info("Experiment completed successfully")
         
