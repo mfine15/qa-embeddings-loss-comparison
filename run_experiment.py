@@ -81,11 +81,11 @@ def run_on_dev_machine(config_file: str):
         bufsize=1
     )
     
-    # # Stream output in real-time
-    # for line in process.stdout or []:
-    #     processed_line = line.strip() # Remove trailing newline/carriage return/spaces
-    #     if processed_line: # Avoid printing empty lines
-    #         print(f"[REMOTE] {processed_line}")
+    while True:
+        # Use read1() instead of read() or Popen.communicate() as both blocks until EOF
+        # https://docs.python.org/3/library/io.html#io.BufferedIOBase.read1
+        text = process.stdout.read1().decode("utf-8")
+        print(text, end='', flush=True)
     
     # Wait for process to complete
     return_code = process.wait()
