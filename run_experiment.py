@@ -74,7 +74,7 @@ def run_on_dev_machine(config_file: str):
     ]
     
     # Run the command and stream output
-    process = os.system(pod_cmd.join(" "))
+    process = os.system(" ".join(pod_cmd))
   
     logger.info("Experiment completed successfully")
 
