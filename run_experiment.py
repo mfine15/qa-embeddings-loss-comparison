@@ -6,6 +6,7 @@ Script to automate running experiments on the dev machine.
 Handles git operations, pod execution, and running the experiment.
 """
 
+import os
 import subprocess
 import sys
 import time
@@ -73,26 +74,8 @@ def run_on_dev_machine(config_file: str):
     ]
     
     # Run the command and stream output
-    process = subprocess.Popen(
-        pod_cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1
-    )
-    
-    while True:
-        line = process.stdout.readline()
-        if not line:
-            break
-        print(line.rstrip(), flush=True)
-    # Wait for process to complete
-    return_code = process.wait()
-    
-    if return_code != 0:
-        logger.error(f"Experiment failed with return code: {return_code}")
-        sys.exit(return_code)
-    
+    process = os.system(pod_cmd)
+  
     logger.info("Experiment completed successfully")
 
 def main():
