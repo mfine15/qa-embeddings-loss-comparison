@@ -1,7 +1,7 @@
 {
   "name": "Multiple Positives with Rank Weighting",
   "data_path": "data/ranked_qa.json",
-  "limit": 1000,
+  "limit": 10000,
   "test_size": 0.02,
   "seed": 42,
   "embed_dim": 768,
