@@ -37,6 +37,14 @@ def run_command(cmd: list, check: bool = True) -> Optional[str]:
 
 def git_commit_and_push():
     """Commit and push changes to git."""
+    logger.info("Checking for changes...")
+    
+    # Check if there are any changes
+    status = run_command(["git", "status", "--porcelain"], check=False)
+    if not status:
+        logger.info("No changes to commit")
+        return
+    
     logger.info("Committing and pushing changes...")
     
     # Add all changes
