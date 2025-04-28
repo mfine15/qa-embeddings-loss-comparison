@@ -196,9 +196,9 @@ def train(config: ExperimentConfig):
             repeat=2
         ),
         on_trace_ready=tensorboard_trace_handler("./log/profiler"),
-        record_shapes=True,
+        record_shapes=False,
         profile_memory=True,
-        with_stack=True
+        with_stack=True,
     ) as prof:
         for epoch in range(config.epochs):
             epoch_start = time.time()
