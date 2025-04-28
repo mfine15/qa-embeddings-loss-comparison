@@ -233,6 +233,8 @@ def train(config: ExperimentConfig):
                         batches_to_process = [batch_data]
                 else:
                     continue
+                
+                print(f"Processing batches {batches_to_process}")
 
                 for batch in batches_to_process:
                     # Forward pass with profiling
