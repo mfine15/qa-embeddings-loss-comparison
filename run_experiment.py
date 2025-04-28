@@ -83,7 +83,7 @@ def run_on_dev_machine(config_file: str):
     
     # Stream output in real-time
     for line in process.stdout or []:
-        processed_line = line.rstrip() # Remove trailing newline/carriage return/spaces
+        processed_line = line.strip() # Remove trailing newline/carriage return/spaces
         if processed_line: # Avoid printing empty lines
             print(f"[REMOTE] {processed_line}")
     
