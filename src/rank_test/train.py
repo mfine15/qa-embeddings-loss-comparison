@@ -56,7 +56,7 @@ def create_dataloaders(config: ExperimentConfig):
     data_path = config.data_path
     ensure_dataset_exists(
         data_path=data_path,
-        data_limit=config.get_limit(),
+        data_limit=config.get_limit() or 0,
         force_regenerate=config.force_regenerate
     )
     
@@ -202,8 +202,9 @@ def train(config: ExperimentConfig):
             epoch_start = time.time()
             batch_times = []
             
+            eval_steps = config.eval_steps if config.eval_steps is not None else 50
             for batch_idx, batch_data in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}")):
-                if batch_idx % config.eval_steps == 0 and (batch_idx > 0 or config.eval_at_zero):
+                if batch_idx % eval_steps == 0 and (batch_idx > 0 or config.eval_at_zero):
                     model.eval()
                     with torch.no_grad():
                         eval_metrics = evaluate_model(model, test_loader, device)
@@ -213,61 +214,69 @@ def train(config: ExperimentConfig):
                     
                 batch_start = time.time()
                 
-                # Unpack batch data
-                if isinstance(batch_data, tuple) and len(batch_data) == 2:
+                # Handle batch: could be dict, list of dicts, or None/empty
+                batches_to_process = []
+                if batch_data is None:
+                    continue
+                elif isinstance(batch_data, tuple) and len(batch_data) == 2:
                     batch, batch_docs = batch_data
+                    if batch is None or (isinstance(batch, (list, dict)) and len(batch) == 0):
+                        continue
+                    batches_to_process = [batch]
+                elif isinstance(batch_data, list):
+                    # List of dicts (e.g. hard negative/listwise)
+                    for item in batch_data:
+                        if item is not None and (not isinstance(item, (list, dict)) or len(item) > 0):
+                            batches_to_process.append(item)
+                elif isinstance(batch_data, dict):
+                    if len(batch_data) > 0:
+                        batches_to_process = [batch_data]
                 else:
-                    batch, batch_docs = batch_data, None
-                
-                # Forward pass with profiling
-                with record_function("forward_pass"):
-                    loss, batch_metrics = loss_fn(model, batch, device)
-                
-                # Backward pass with profiling
-                with record_function("backward_pass"):
-                    with record_function("optimizer.zero_grad"):
-                        optimizer.zero_grad()
-                    with record_function("loss.backward"):
-                        loss.backward()
-                    with record_function("optimizer.step"):
-                        optimizer.step()
-                
-                # Update counters
-                global_step += 1
-                total_docs_processed += len(batch['scores']) if 'scores' in batch else 1
-                
-                # Record timing
-                batch_end = time.time()
-                batch_time = batch_end - batch_start
-                batch_times.append(batch_time)
-                
-                # Log metrics
-                if wandb.run is not None:
-                    metrics = {
-                        'train/loss': loss.item(),
-                        'train/step': global_step,
-                        'train/epoch': epoch + 1,
-                        'train/docs_processed': total_docs_processed,
-                        'train/docs_per_second': len(batch['scores']) / batch_time if 'scores' in batch else 1/batch_time,
-                        'train/batch_time': batch_time,
-                        **{f'train/{k}': v for k, v in batch_metrics.items()}
-                    }
-                    wandb.log(metrics)
-                
-                # Step profiler
-                prof.step()
-                
-                # Print occasional timing stats
-                if batch_idx % 50 == 0 and batch_idx > 0:
-                    avg_time = sum(batch_times[-10:]) / min(10, len(batch_times))
-                    speed = len(batch['scores']) / avg_time if 'scores' in batch else 1/avg_time
-                    print(f"  Batch {batch_idx}: {avg_time:.4f}s/batch, ~{speed:.1f} examples/s")
-                    
-                    # Print profiling stats
-                    print(prof.key_averages().table(
-                        sort_by="cpu_time_total",
-                        row_limit=100
-                    ))
+                    continue
+
+                for batch in batches_to_process:
+                    # Forward pass with profiling
+                    with record_function("forward_pass"):
+                        loss, batch_metrics = loss_fn(model, batch, device)
+                    # Backward pass with profiling
+                    with record_function("backward_pass"):
+                        with record_function("optimizer.zero_grad"):
+                            optimizer.zero_grad()
+                        with record_function("loss.backward"):
+                            loss.backward()
+                        with record_function("optimizer.step"):
+                            optimizer.step()
+                    # Update counters
+                    global_step += 1
+                    total_docs_processed += len(batch['scores']) if isinstance(batch, dict) and 'scores' in batch else 1
+                    # Record timing
+                    batch_end = time.time()
+                    batch_time = batch_end - batch_start
+                    batch_times.append(batch_time)
+                    # Log metrics
+                    if wandb.run is not None:
+                        metrics = {
+                            'train/loss': loss.item(),
+                            'train/step': global_step,
+                            'train/epoch': epoch + 1,
+                            'train/docs_processed': total_docs_processed,
+                            'train/docs_per_second': len(batch['scores']) / batch_time if isinstance(batch, dict) and 'scores' in batch else 1/batch_time,
+                            'train/batch_time': batch_time,
+                            **{f'train/{k}': v for k, v in batch_metrics.items()}
+                        }
+                        wandb.log(metrics)
+                    # Step profiler
+                    prof.step()
+                    # Print occasional timing stats
+                    if batch_idx % 50 == 0 and batch_idx > 0:
+                        avg_time = sum(batch_times[-10:]) / min(10, len(batch_times))
+                        speed = len(batch['scores']) / avg_time if isinstance(batch, dict) and 'scores' in batch else 1/avg_time
+                        print(f"  Batch {batch_idx}: {avg_time:.4f}s/batch, ~{speed:.1f} examples/s")
+                        # Print profiling stats
+                        print(prof.key_averages().table(
+                            sort_by="cpu_time_total",
+                            row_limit=100
+                        ))
     
             # End of epoch stats
             epoch_time = time.time() - epoch_start
