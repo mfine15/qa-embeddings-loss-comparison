@@ -81,8 +81,8 @@ def run_on_dev_machine(config_file: str):
     )
     
     # Stream output in real-time
-    for line in process.stdout:
-        print(line, end='')
+    for line in process.stdout or []:
+        print(f"[REMOTE] {line}")
     
     # Wait for process to complete
     return_code = process.wait()
