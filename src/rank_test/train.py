@@ -187,8 +187,7 @@ def train(config: ExperimentConfig):
     activities = [ProfilerActivity.CPU]
     if torch.cuda.is_available():
         activities.append(ProfilerActivity.CUDA)
-    elif torch.backends.mps.is_available():
-        activities.append(ProfilerActivity.MPS)
+
         
     with profile(
         activities=activities,
