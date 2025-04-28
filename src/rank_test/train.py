@@ -227,9 +227,12 @@ def train(config: ExperimentConfig):
                 
                 # Backward pass with profiling
                 with record_function("backward_pass"):
-                    optimizer.zero_grad()
-                    loss.backward()
-                    optimizer.step()
+                    with record_function("optimizer.zero_grad"):
+                        optimizer.zero_grad()
+                    with record_function("loss.backward"):
+                        loss.backward()
+                    with record_function("optimizer.step"):
+                        optimizer.step()
                 
                 # Update counters
                 global_step += 1
