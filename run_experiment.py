@@ -6,7 +6,6 @@ Script to automate running experiments on the dev machine.
 Handles git operations, pod execution, and running the experiment.
 """
 
-import os
 import subprocess
 import sys
 import time
@@ -74,7 +73,11 @@ def run_on_dev_machine(config_file: str):
     ]
     
     # Run the command and stream output
-    process = os.system(" ".join(pod_cmd))
+    process = subprocess.Popen(pod_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    for line in iter(process.stdout.readline, ''):
+        print(line, end='')
+    process.stdout.close()
+    process.wait()
   
     logger.info("Experiment completed successfully")
 
