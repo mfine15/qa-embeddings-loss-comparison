@@ -267,8 +267,8 @@ def train(config: ExperimentConfig):
                     
                     # Print profiling stats
                     print(prof.key_averages().table(
-                        sort_by="cuda_time_total" if torch.cuda.is_available() else "cpu_time_total",
-                        row_limit=50
+                        sort_by="cpu_time_total",
+                        row_limit=100
                     ))
     
             # End of epoch stats
