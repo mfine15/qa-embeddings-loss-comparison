@@ -82,11 +82,10 @@ def run_on_dev_machine(config_file: str):
     )
     
     while True:
-        # Use read1() instead of read() or Popen.communicate() as both blocks until EOF
-        # https://docs.python.org/3/library/io.html#io.BufferedIOBase.read1
-        text = process.stdout.read1().decode("utf-8")
-        print(text, end='', flush=True)
-    
+        line = process.stdout.readline()
+        if not line:
+            break
+        print(line.rstrip(), flush=True)
     # Wait for process to complete
     return_code = process.wait()
     
