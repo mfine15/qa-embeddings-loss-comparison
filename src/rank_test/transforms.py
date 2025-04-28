@@ -493,7 +493,7 @@ def listwise_batch_transform(
         
         # Add to batch
         batch_items.append({
-            'q_input_ids': q_encoding['input_ids'].squeeze(0).to(device),
+            'q_input_ids': q_encoding['input_ids'].squeeze(0),
             'q_attention_mask': q_encoding['attention_mask'].squeeze(0),
             'a_input_ids': a_input_ids,
             'a_attention_masks': a_attention_masks,

@@ -6,7 +6,6 @@ Training module for QA ranking models using HuggingFace datasets.
 Provides a streamlined training process with unified loss functions.
 """
 
-import json
 import random
 import time
 import torch
@@ -22,6 +21,9 @@ from rank_test.optimized_dataset import OptimizedQADataset as QADataset, ensure_
 from rank_test.losses import create_unified_loss
 from rank_test.evaluate import evaluate_model
 from pydargs import parse
+from torch.profiler import profile, record_function, ProfilerActivity, tensorboard_trace_handler
+
+
 
 def get_device():
     """Get appropriate device for training"""
@@ -138,7 +140,8 @@ def train(config: ExperimentConfig):
     device = get_device()
     
     # Initialize wandb if enabled
-    if config.log_to_wandb and wandb.run is None:
+    if config.log_to_wandb:
+        print("Logging to wandb")
         run_name = f"{config.name}-{time.strftime('%Y%m%d-%H%M%S')}"
         wandb.init(
             project=config.wandb_project,
@@ -153,7 +156,9 @@ def train(config: ExperimentConfig):
                 columns=["Parameter", "Value"], 
                 data=loss_params
             )})
-    
+    else:
+        print("Not logging to wandb")
+
     # Create model
     print(f"Creating model with embed_dim={config.embed_dim} and projection_dim={config.projection_dim}")
     model = QAEmbeddingModel(
@@ -170,85 +175,111 @@ def train(config: ExperimentConfig):
     
     # Create optimizer
     optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate)
-    
-    # Initial evaluation
-    if config.eval_at_zero and test_loader is not None:
-        print("\nRunning evaluation at step 0 (initial model)...")
-        model.eval()
-        with torch.no_grad():
-            initial_metrics = evaluate_model(model, test_loader, device)
-            if wandb.run is not None:
-                wandb.log({f"eval/{k}": v for k, v in initial_metrics.items()})
-        model.train()
-    
+
     # Training loop with timing
     global_step = 0
     total_docs_processed = 0
     total_train_time = 0
     
     print(f"Starting training for {config.epochs} epochs")
-    for epoch in range(config.epochs):
-        epoch_start = time.time()
-        batch_times = []
-        
-        for batch_idx, batch_data in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}")):
-            batch_start = time.time()
-            
-            # Unpack batch data
-            if isinstance(batch_data, tuple) and len(batch_data) == 2:
-                batch, batch_docs = batch_data
-            else:
-                batch, batch_docs = batch_data, None
-            
-            # Forward pass
-            loss, batch_metrics = loss_fn(model, batch, device)
-            
-            # Backward pass
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            # Update counters
-            global_step += 1
-            total_docs_processed += len(batch['scores']) if 'scores' in batch else 1
-            
-            # Log metrics
-            if wandb.run is not None:
-                metrics = {
-                    'train/loss': loss.item(),
-                    'train/step': global_step,
-                    'train/epoch': epoch + 1,
-                    'train/docs_processed': total_docs_processed,
-                    **{f'train/{k}': v for k, v in batch_metrics.items()}
-                }
-                wandb.log(metrics)
-                
-            # Record timing
-            batch_end = time.time()
-            batch_time = batch_end - batch_start
-            batch_times.append(batch_time)
-            
-            # Print occasional timing stats
-            if batch_idx % 10 == 0 and batch_idx > 0:
-                avg_time = sum(batch_times[-10:]) / min(10, len(batch_times))
-                speed = len(batch['scores']) / avg_time if 'scores' in batch else 1/avg_time
-                print(f"  Batch {batch_idx}: {avg_time:.4f}s/batch, ~{speed:.1f} examples/s")
-        
-        # End of epoch stats
-        epoch_time = time.time() - epoch_start
-        total_train_time += epoch_time
-        avg_batch_time = sum(batch_times) / len(batch_times)
-        print(f"Epoch {epoch+1} completed in {epoch_time:.2f}s ({avg_batch_time:.4f}s/batch avg)")
-        
-        # Evaluate at the end of each epoch
-        if test_loader is not None:
-            model.eval()
-            with torch.no_grad():
-                eval_metrics = evaluate_model(model, test_loader, device)
-                if wandb.run is not None:
-                    wandb.log({f"eval/{k}": v for k, v in eval_metrics.items()})
-            model.train()
     
+    # Setup profiler
+    activities = [ProfilerActivity.CPU]
+    if torch.cuda.is_available():
+        activities.append(ProfilerActivity.CUDA)
+    elif torch.backends.mps.is_available():
+        activities.append(ProfilerActivity.MPS)
+        
+    with profile(
+        activities=activities,
+        schedule=torch.profiler.schedule(
+            wait=1,
+            warmup=1,
+            active=3,
+            repeat=2
+        ),
+        on_trace_ready=tensorboard_trace_handler("./log/profiler"),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True
+    ) as prof:
+        for epoch in range(config.epochs):
+            epoch_start = time.time()
+            batch_times = []
+            
+            for batch_idx, batch_data in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}")):
+                if batch_idx % config.eval_steps == 0 and (batch_idx > 0 or config.eval_at_zero):
+                    model.eval()
+                    with torch.no_grad():
+                        eval_metrics = evaluate_model(model, test_loader, device)
+                        if wandb.run is not None:
+                            wandb.log({f"eval/{k}": v for k, v in eval_metrics.items()})
+                    model.train()
+                    
+                batch_start = time.time()
+                
+                # Unpack batch data
+                if isinstance(batch_data, tuple) and len(batch_data) == 2:
+                    batch, batch_docs = batch_data
+                else:
+                    batch, batch_docs = batch_data, None
+                
+                # Forward pass with profiling
+                with record_function("forward_pass"):
+                    loss, batch_metrics = loss_fn(model, batch, device)
+                
+                # Backward pass with profiling
+                with record_function("backward_pass"):
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                
+                # Update counters
+                global_step += 1
+                total_docs_processed += len(batch['scores']) if 'scores' in batch else 1
+                
+                # Record timing
+                batch_end = time.time()
+                batch_time = batch_end - batch_start
+                batch_times.append(batch_time)
+                
+                # Log metrics
+                if wandb.run is not None:
+                    metrics = {
+                        'train/loss': loss.item(),
+                        'train/step': global_step,
+                        'train/epoch': epoch + 1,
+                        'train/docs_processed': total_docs_processed,
+                        'train/docs_per_second': len(batch['scores']) / batch_time if 'scores' in batch else 1/batch_time,
+                        'train/batch_time': batch_time,
+                        **{f'train/{k}': v for k, v in batch_metrics.items()}
+                    }
+                    wandb.log(metrics)
+                
+                # Step profiler
+                prof.step()
+                
+                # Print occasional timing stats
+                if batch_idx % 10 == 0 and batch_idx > 0:
+                    avg_time = sum(batch_times[-10:]) / min(10, len(batch_times))
+                    speed = len(batch['scores']) / avg_time if 'scores' in batch else 1/avg_time
+                    print(f"  Batch {batch_idx}: {avg_time:.4f}s/batch, ~{speed:.1f} examples/s")
+                    
+                    # Print profiling stats
+                    print(prof.key_averages().table(
+                        sort_by="cuda_time_total" if torch.cuda.is_available() else "cpu_time_total",
+                        row_limit=10
+                    ))
+    
+            # End of epoch stats
+            epoch_time = time.time() - epoch_start
+            total_train_time += epoch_time
+            avg_batch_time = sum(batch_times) / len(batch_times)
+            print(f"Epoch {epoch+1} completed in {epoch_time:.2f}s ({avg_batch_time:.4f}s/batch avg)")
+            
+            # Export profiling data
+            prof.export_chrome_trace(f"trace_epoch_{epoch}.json")
+            
     # Final evaluation
     if test_loader is not None:
         print("\nRunning final evaluation...")

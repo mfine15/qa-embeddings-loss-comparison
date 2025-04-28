@@ -10,7 +10,6 @@ for creating training data from ranked QA pairs.
 import json
 import os
 import random
-import time
 import csv
 import sys
 from collections import defaultdict
@@ -245,7 +244,6 @@ def download_dataset():
         # Fall back to using sample data for testing
         print("Falling back to sample data for testing")
         return "data"
-
 def parse_posts(data_dir, limit=None):
     """
     Parse questions and answers from CSV files.
@@ -272,10 +270,6 @@ def parse_posts(data_dir, limit=None):
     
     try:
         # First pass: collect all answers
-        answer_count = 0
-        start_time = time.time()
-        last_update_time = start_time
-        
         print("First pass: collecting answers...")
         
         with open(answers_file, 'r', encoding='latin-1') as f:
@@ -290,7 +284,7 @@ def parse_posts(data_dir, limit=None):
             # Create CSV reader
             reader = csv.reader(f)
             
-            # Create progress bar
+            # Process answers with progress bar
             for row in tqdm(reader, total=total_lines, desc="Parsing answers"):
                 # Skip empty rows
                 if not row:
@@ -305,24 +299,9 @@ def parse_posts(data_dir, limit=None):
                     "score": int(score),
                     "is_accepted": False  # Will be set later
                 })
-                answer_count += 1
-                
-                # Print progress every 1000 answers or every 5 seconds
-                current_time = time.time()
-                if answer_count % 1000 == 0 or (current_time - last_update_time >= 5 and answer_count % 100 == 0):
-                    elapsed = current_time - start_time
-                    rate = answer_count / elapsed if elapsed > 0 else 0
-                    print(f"  Processed {answer_count} answers... ({rate:.1f} answers/sec)")
-                    last_update_time = current_time
-        
-        elapsed = time.time() - start_time
-        print(f"Collected {answer_count} answers for {len(answers)} questions in {elapsed:.1f} seconds.")
         
         # Second pass: collect questions that have answers
         print("Second pass: collecting questions with answers...")
-        start_time = time.time()
-        last_update_time = start_time
-        question_count = 0
         
         with open(questions_file, 'r', encoding='latin-1') as f:
             # Skip header
@@ -336,7 +315,7 @@ def parse_posts(data_dir, limit=None):
             # Create CSV reader
             reader = csv.reader(f)
             
-            # Create progress bar
+            # Process questions with progress bar
             for row in tqdm(reader, total=total_lines, desc="Parsing questions"):
                 # Skip empty rows
                 if not row:
@@ -358,31 +337,17 @@ def parse_posts(data_dir, limit=None):
                         "accepted_answer_id": None  # Will try to determine later
                     }
                     
-                    question_count += 1
-                    
-                    # Print progress every 100 questions or every 5 seconds
-                    current_time = time.time()
-                    if question_count % 100 == 0 or (current_time - last_update_time >= 5 and question_count % 10 == 0):
-                        elapsed = current_time - start_time
-                        rate = question_count / elapsed if elapsed > 0 else 0
-                        print(f"  Processed {question_count} questions with answers... ({rate:.1f} questions/sec)")
-                        last_update_time = current_time
-                    
                     # Apply limit if specified
-                    if limit and question_count >= limit:
+                    if limit and len(questions) >= limit:
                         print(f"Reached limit of {limit} questions.")
                         break
-        
-        elapsed = time.time() - start_time
-        print(f"Collected {question_count} questions with answers in {elapsed:.1f} seconds.")
         
         # Since we don't have accepted answers in this dataset, 
         # we'll consider the highest scored answer as the accepted one
         print("Ranking answers by score...")
-        start_time = time.time()
         
         # Rank answers by score for each question
-        for q_id in answers:
+        for q_id in tqdm(answers.keys(), desc="Ranking answers"):
             # Sort answers by score (highest first)
             answers[q_id].sort(key=lambda x: x["score"], reverse=True)
             
@@ -392,9 +357,6 @@ def parse_posts(data_dir, limit=None):
                 top_answer = answers[q_id][0]
                 top_answer["is_accepted"] = True
                 questions[q_id]["accepted_answer_id"] = top_answer["id"]
-        
-        elapsed = time.time() - start_time
-        print(f"Ranked all answers and marked highest-scored answers as accepted in {elapsed:.1f} seconds.")
         
         # If no questions were collected or limit is 0, use sample data
         if not questions or (limit is not None and limit <= 0):
