@@ -62,6 +62,7 @@ def run_on_dev_machine(config_file: str):
     """Run the experiment on the dev machine."""
     logger.info(f"Running experiment with config: {config_file}")
     
+    
     # Construct the command to run in the pod
     pod_cmd = [
         "kubectl", "exec", "--namespace=dev", "-it", "pod/dev-machine-0", "--", "bash",
