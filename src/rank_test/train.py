@@ -14,7 +14,7 @@ import wandb
 from tqdm import tqdm
 
 from rank_test.config import ExperimentConfig
-from transformers import DistilBertTokenizerFast
+from transformers import AutoTokenizer
 from rank_test.transforms import get_batch_transform
 from rank_test.models import QAEmbeddingModel
 from rank_test.optimized_dataset import OptimizedQADataset as QADataset, ensure_dataset_exists, parse_from_json
@@ -60,7 +60,7 @@ def create_dataloaders(config: ExperimentConfig):
     )
     
     # Create tokenizer (shared between datasets)
-    tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
+    tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     
     # Get batch transform functions
     train_transform_fn = get_batch_transform(config.batch_transform)
@@ -160,9 +160,9 @@ def train(config: ExperimentConfig):
         print("Not logging to wandb")
 
     # Create model
-    print(f"Creating model with embed_dim={config.embed_dim} and projection_dim={config.projection_dim}")
+    print(f"Creating model with {config.model_name}")
     model = QAEmbeddingModel(
-        embed_dim=config.embed_dim,
+        model_name=config.model_name,
         projection_dim=config.projection_dim
     ).to(device)
     

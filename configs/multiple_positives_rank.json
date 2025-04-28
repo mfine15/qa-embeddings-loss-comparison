@@ -21,5 +21,6 @@
   "temperature": 0.1,
   "use_ranks": true,
   "use_scores": false,
-  "rank_weight": 0.1
+  "rank_weight": 0.1,
+  "model_name": "Qwen/Qwen2.5-0.5B"
 }

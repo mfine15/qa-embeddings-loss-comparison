@@ -420,6 +420,183 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 This project is licensed under the MIT License - see the LICENSE file for details.
 
 ---
+./profile_trainer.py
+---
+#!/usr/bin/env python
+import cProfile
+import pstats
+import io
+from rank_test.train import cli
+
+# Run the CLI with profiling
+profiler = cProfile.Profile()
+profiler.enable()
+
+# Run the training process
+cli()
+
+# Disable profiler and print stats
+profiler.disable()
+s = io.StringIO()
+stats = pstats.Stats(profiler, stream=s).sort_stats('cumtime')
+stats.print_stats(30)  # Print top 30 time-consuming functions
+print(s.getvalue())
+
+# Also save detailed stats to a file
+with open('profile_results.txt', 'w') as f:
+    stats = pstats.Stats(profiler, stream=f).sort_stats('cumtime')
+    stats.print_stats(100)  # Print top 100 time-consuming functions
+
+---
+./run_experiment.py
+---
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+Script to automate running experiments on the dev machine.
+Handles git operations, pod execution, and running the experiment.
+"""
+
+import subprocess
+import sys
+import time
+import logging
+from pathlib import Path
+from typing import Optional
+from kubernetes import config
+from kubernetes.client import CoreV1Api
+from kubernetes.stream import stream
+
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+def run_command(cmd: list, check: bool = True) -> Optional[str]:
+    """Run a shell command and return its output."""
+    try:
+        result = subprocess.run(cmd, check=check, capture_output=True, text=True)
+        return result.stdout.strip()
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Command failed: {' '.join(cmd)}")
+        logger.error(f"Error: {e.stderr}")
+        if check:
+            raise
+        return None
+
+def git_commit_and_push():
+    """Commit and push changes to git."""
+    logger.info("Checking for changes...")
+    
+    # Check if there are any changes
+    status = run_command(["git", "status", "--porcelain"], check=False)
+    if not status:
+        logger.info("No changes to commit")
+        return
+    
+    logger.info("Committing and pushing changes...")
+    
+    # Add all changes
+    run_command(["git", "add", "."])
+    
+    # Commit with timestamp
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    run_command(["git", "commit", "-m", f"Auto commit: {timestamp}"])
+    
+    # Push
+    run_command(["git", "push"])
+    logger.info("Git operations completed successfully")
+
+def run_on_dev_machine(config_file: str):
+    """Run the experiment on the dev machine using Kubernetes API."""
+    logger.info(f"Running experiment with config: {config_file}")
+    
+    # Load kubernetes configuration
+    try:
+        config.load_kube_config()
+    except Exception as e:
+        logger.error(f"Failed to load kubernetes config: {e}")
+        raise
+    
+    # Create API client
+    v1 = CoreV1Api()
+    
+    # Construct the command to run in the pod
+    command = [
+        "bash",
+        "-c",
+        f"cd /home/qa-embeddings-loss-comparison && "
+        f"git pull && "
+        f"uv run rank-test --config-file {config_file}"
+    ]
+    
+    try:
+        # Execute command in pod with streaming
+        resp = stream(
+            v1.connect_get_namespaced_pod_exec,
+            "dev-machine-0",
+            "dev",
+            command=command,
+            stderr=True,
+            stdin=False,
+            stdout=True,
+            tty=False,
+            _preload_content=False  # Don't preload content to enable streaming
+        )
+        
+        # Stream the output in real-time
+        while resp.is_open():
+            resp.update(timeout=1)
+            if resp.peek_stdout():
+                print(resp.read_stdout(), end='')
+            if resp.peek_stderr():
+                print(resp.read_stderr(), end='', file=sys.stderr)
+        
+        # Close the stream
+        resp.close()
+        
+        logger.info("Experiment completed successfully")
+        
+    except Exception as e:
+        logger.error(f"Failed to execute command in pod: {e}")
+        raise
+
+def main():
+    """Main entry point."""
+    if len(sys.argv) != 2:
+        print("Usage: python run_experiment.py <config_file>")
+        print("Example: python run_experiment.py configs/multiple_positives_rank.json")
+        sys.exit(1)
+    
+    config_file = sys.argv[1]
+    
+    # Validate config file exists
+    if not Path(config_file).exists():
+        logger.error(f"Config file not found: {config_file}")
+        sys.exit(1)
+    
+    try:
+        # Step 1: Commit and push changes
+        git_commit_and_push()
+        
+        # Step 2: Run on dev machine
+        run_on_dev_machine(config_file)
+        
+    except Exception as e:
+        logger.error(f"Error running experiment: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main() 
+
+---
 ./test_simplified_train.py
 ---
 #!/usr/bin/env python
@@ -465,6 +642,28 @@ if __name__ == "__main__":
     print("Testing simplified training module...")
     model = train(config)
     print("Test complete!")
+
+---
+./tmp_patch.py
+---
+import re
+
+# Read the file content
+with open('/Users/mfine/Exa/rank-test/src/rank_test/dataset.py', 'r') as f:
+    content = f.read()
+
+# Add the print statement after the batch_indices creation
+pattern = r'(batch_indices = \[\s+indices\[i:i\+self\.batch_size\]\s+for i in range\(0, num_items, self\.batch_size\)\s+\])'
+replacement = r'\1\n        \n        print(f"Created {len(batch_indices)} batches")'
+
+# Replace in the content
+new_content = re.sub(pattern, replacement, content)
+
+# Write back the modified content
+with open('/Users/mfine/Exa/rank-test/src/rank_test/dataset.py', 'w') as f:
+    f.write(new_content)
+
+print("Patch applied.")
 
 ---
 ./tests/unit/test_flexible_dataset.py
@@ -1326,19 +1525,23 @@ Provides a simple, flat structure for experiment configuration.
 from typing import Dict, Any, Optional, Union, Literal
 from pathlib import Path
 import json
-from pydantic import BaseModel, Field
-from argdantic.sources import from_file, JsonFileLoader
+from pydantic import Field
 # Type definitions using literals instead of enums
 DatasetStrategyType = Literal["standard", "flexible"]
 BatchTransformType = Literal["infonce", "multiple_positives", "hard_negative", "triplet", "listwise"]
 NegativeStrategyType = Literal["hard_negative", "in_batch", "mixed"]
 LossType = Literal["infonce", "rank_infonce", "relaxed_hard_neg", "triplet", "listwise", "mse"]
+from pydantic.dataclasses import dataclass
 
-@from_file(loader=JsonFileLoader)
-class ExperimentConfig(BaseModel):
+@dataclass
+class ExperimentConfig:
     """Complete experiment configuration with flat structure"""
     # Experiment metadata
     name: Optional[str] = Field(default=None, description="Name of the experiment")
+    
+    # Model settings
+    model_name: str = Field(default="distilbert-base-uncased", description="Name of the pretrained model to use")
+    projection_dim: int = Field(default=128, description="Dimension for embeddings projection")
     
     # Data settings
     data_path: str = Field(default="data/ranked_qa.json", description="Path to the dataset JSON file")
@@ -1346,10 +1549,6 @@ class ExperimentConfig(BaseModel):
     test_size: float = Field(default=0.2, description="Proportion of data to use for testing")
     seed: int = Field(default=42, description="Random seed for reproducibility")
     force_regenerate: bool = Field(default=False, description="Force dataset regeneration")
-    
-    # Model settings
-    embed_dim: int = Field(default=768, description="Embedding dimension from BERT")
-    projection_dim: int = Field(default=128, description="Dimension for embeddings projection")
     
     # Training settings
     batch_size: int = Field(default=64, description="Training batch size")
@@ -1594,100 +1793,125 @@ for creating training data from ranked QA pairs.
 import json
 import os
 import random
-import time
 import csv
 import sys
 from collections import defaultdict
 from typing import Callable
-from torch.utils.data import Dataset, DataLoader
-from tqdm import tqdm, trange
+from torch.utils.data import Dataset
+from tqdm import tqdm
 from transformers import DistilBertTokenizerFast
 
+# Function to process a single batch
+def process_batch(args):
+    """Process a single batch of data and apply the transform function"""
+    batch_idx, raw_data, batch_transform_fn, tokenizer, max_length, device, kwargs = args
+    # Gather the data for this batch
+    batch_data = [raw_data[idx] for idx in batch_idx]
+    
+    # Apply the transform to create model-ready batch
+    result = batch_transform_fn(
+        batch_data,
+        tokenizer,
+        max_length,
+        device=device,
+        **kwargs
+    )
+    
+    # Handle return value (either just batch or doc count)
+    if isinstance(result, tuple) and len(result) == 2:
+        processed_batch, batch_docs = result
+    else:
+        processed_batch = result
+        # Estimate docs if not provided (backward compatibility) 
+        batch_docs = len(batch_data) * 2  # Rough estimate: 1 question + 1 answer per item
+        
+    if processed_batch:  # Skip empty batches
+        return (processed_batch, batch_docs)
+    return None
 
 class QADataset(Dataset):
     """
-    Flexible QA dataset that supports various batch transformation strategies.
+    Optimized dataset that supports various batch transformation strategies.
     This dataset provides configurable approaches for creating training data
-    from ranked QA pairs for different loss functions.
+    from ranked QA pairs for different loss functions with improved performance.
     """
     
     def __init__(
         self, 
-        data_path: str, 
+        data: list, 
         batch_transform_fn: Callable = None, 
         batch_size: int = 16, 
         tokenizer = None,
         max_length: int = 128,
         shuffle: bool = True,
+        limit: int = None,
+        device = "cpu",
         **kwargs
     ):
         """
         Initialize the dataset with a specific batch transformation strategy.
         
         Args:
-            data_path: Path to JSON dataset with ranked QA pairs
+            data: List of data items to process
             batch_transform_fn: Function that transforms raw data to model-ready batches
             batch_size: Batch size for pre-processing
             tokenizer: Tokenizer to use (will create DistilBERT tokenizer if None)
             max_length: Maximum sequence length for tokenization
             shuffle: Whether to shuffle data during batch creation
+            limit: Maximum number of data items to use (applied before batching)
+            device: Device to place tensors on
             **kwargs: Additional parameters for the batch transform function
         """
-        # Load raw data
-        with open(data_path, 'r') as f:
-            self.raw_data = json.load(f)
+        # Store input data
+        self.raw_data = data
             
         # Store tokenizer and other parameters
         self.tokenizer = tokenizer or DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
         self.max_length = max_length
-        
-        # Use provided transform or default
-        self.batch_transform_fn = batch_transform_fn or infonce_batch_transform
+        self.batch_transform_fn = batch_transform_fn
         self.batch_size = batch_size
         self.shuffle = shuffle
+        self.limit = limit
+        self.device = device
         self.kwargs = kwargs
         
-        # Pre-process into batches
+        # Process data into batches
         self.batches = self._create_batches()
         
     def _create_batches(self):
         """Transform raw data into batches based on the strategy"""
         # Create mini-batches of raw data
-        num_items = len(self.raw_data)
+        raw_data = self.raw_data
+        
+        # Apply limit before batching if specified
+        if self.limit is not None:
+            raw_data = raw_data[:self.limit]
+            print(f"Limiting dataset to {self.limit} items")
+        
+        num_items = len(raw_data)
         indices = list(range(num_items))
         
         if self.shuffle:
             random.shuffle(indices)
         
         batches = []
-        print(f"Creating {len(indices)} batches of size {self.batch_size}")
+        print(f"Creating batches from {num_items} items with batch size {self.batch_size}")
         print(f"Using tokenizer: {self.tokenizer}")
         
-        for i in trange(0, num_items, self.batch_size, desc="Creating batches"):
-            batch_indices = indices[i:i+self.batch_size]
-            batch_data = [self.raw_data[idx] for idx in batch_indices]
-            
-            # Apply the transform to create model-ready batch
-            result = self.batch_transform_fn(
-                batch_data, 
-                self.tokenizer, 
-                self.max_length, 
-                **self.kwargs
-            )
-            
-            # Handle return value (either just batch or batch with doc count)
-            if isinstance(result, tuple) and len(result) == 2:
-                processed_batch, batch_docs = result
-            else:
-                processed_batch = result
-                # Estimate docs if not provided (backward compatibility)
-                batch_docs = len(batch_data) * 2  # Rough estimate: 1 question + 1 answer per item
-            
-            if processed_batch:  # Skip empty batches
-                # Store batch with its individual doc count (not cumulative)
-                batches.append((processed_batch, batch_docs))
-                
-        return batches
+        # Create list of batch indices
+        batch_indices = [
+            indices[i:i+self.batch_size] 
+            for i in range(0, num_items, self.batch_size)
+        ]
+        
+        print(f"Created {len(batch_indices)} batches")
+        
+        
+    
+        # results = process_map(process_batch, [(batch_idx, self.raw_data, self.batch_transform_fn, self.tokenizer, self.max_length, self.kwargs) for batch_idx in batch_indices], max_workers=30)
+        results = [process_batch((batch_idx, raw_data, self.batch_transform_fn, self.tokenizer, self.max_length, self.kwargs)) for batch_idx in tqdm(batch_indices)]
+        # Filter out None results and return
+        return [r for r in results if r is not None]
     
     def __len__(self):
         """Return number of batches"""
@@ -1704,12 +1928,7 @@ class QADataset(Dataset):
         
         Since the dataset already returns batches, use batch_size=1
         """
-        return DataLoader(
-            dataset,
-            batch_size=1,
-            shuffle=shuffle,
-            collate_fn=lambda x: x[0]  # Extract single batch from list
-        )
+        return dataset
 
 def parse_from_json(data_path: str, limit: int = None) -> list:
     """
@@ -1808,7 +2027,6 @@ def download_dataset():
         # Fall back to using sample data for testing
         print("Falling back to sample data for testing")
         return "data"
-
 def parse_posts(data_dir, limit=None):
     """
     Parse questions and answers from CSV files.
@@ -1835,10 +2053,6 @@ def parse_posts(data_dir, limit=None):
     
     try:
         # First pass: collect all answers
-        answer_count = 0
-        start_time = time.time()
-        last_update_time = start_time
-        
         print("First pass: collecting answers...")
         
         with open(answers_file, 'r', encoding='latin-1') as f:
@@ -1853,7 +2067,7 @@ def parse_posts(data_dir, limit=None):
             # Create CSV reader
             reader = csv.reader(f)
             
-            # Create progress bar
+            # Process answers with progress bar
             for row in tqdm(reader, total=total_lines, desc="Parsing answers"):
                 # Skip empty rows
                 if not row:
@@ -1868,24 +2082,9 @@ def parse_posts(data_dir, limit=None):
                     "score": int(score),
                     "is_accepted": False  # Will be set later
                 })
-                answer_count += 1
-                
-                # Print progress every 1000 answers or every 5 seconds
-                current_time = time.time()
-                if answer_count % 1000 == 0 or (current_time - last_update_time >= 5 and answer_count % 100 == 0):
-                    elapsed = current_time - start_time
-                    rate = answer_count / elapsed if elapsed > 0 else 0
-                    print(f"  Processed {answer_count} answers... ({rate:.1f} answers/sec)")
-                    last_update_time = current_time
-        
-        elapsed = time.time() - start_time
-        print(f"Collected {answer_count} answers for {len(answers)} questions in {elapsed:.1f} seconds.")
         
         # Second pass: collect questions that have answers
         print("Second pass: collecting questions with answers...")
-        start_time = time.time()
-        last_update_time = start_time
-        question_count = 0
         
         with open(questions_file, 'r', encoding='latin-1') as f:
             # Skip header
@@ -1899,7 +2098,7 @@ def parse_posts(data_dir, limit=None):
             # Create CSV reader
             reader = csv.reader(f)
             
-            # Create progress bar
+            # Process questions with progress bar
             for row in tqdm(reader, total=total_lines, desc="Parsing questions"):
                 # Skip empty rows
                 if not row:
@@ -1921,31 +2120,17 @@ def parse_posts(data_dir, limit=None):
                         "accepted_answer_id": None  # Will try to determine later
                     }
                     
-                    question_count += 1
-                    
-                    # Print progress every 100 questions or every 5 seconds
-                    current_time = time.time()
-                    if question_count % 100 == 0 or (current_time - last_update_time >= 5 and question_count % 10 == 0):
-                        elapsed = current_time - start_time
-                        rate = question_count / elapsed if elapsed > 0 else 0
-                        print(f"  Processed {question_count} questions with answers... ({rate:.1f} questions/sec)")
-                        last_update_time = current_time
-                    
                     # Apply limit if specified
-                    if limit and question_count >= limit:
+                    if limit and len(questions) >= limit:
                         print(f"Reached limit of {limit} questions.")
                         break
-        
-        elapsed = time.time() - start_time
-        print(f"Collected {question_count} questions with answers in {elapsed:.1f} seconds.")
         
         # Since we don't have accepted answers in this dataset, 
         # we'll consider the highest scored answer as the accepted one
         print("Ranking answers by score...")
-        start_time = time.time()
         
         # Rank answers by score for each question
-        for q_id in answers:
+        for q_id in tqdm(answers.keys(), desc="Ranking answers"):
             # Sort answers by score (highest first)
             answers[q_id].sort(key=lambda x: x["score"], reverse=True)
             
@@ -1955,9 +2140,6 @@ def parse_posts(data_dir, limit=None):
                 top_answer = answers[q_id][0]
                 top_answer["is_accepted"] = True
                 questions[q_id]["accepted_answer_id"] = top_answer["id"]
-        
-        elapsed = time.time() - start_time
-        print(f"Ranked all answers and marked highest-scored answers as accepted in {elapsed:.1f} seconds.")
         
         # If no questions were collected or limit is 0, use sample data
         if not questions or (limit is not None and limit <= 0):
@@ -3762,21 +3944,22 @@ def create_unified_loss(loss_name, **kwargs):
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-import torch
 import torch.nn as nn
-from transformers import DistilBertModel
+from transformers import AutoModel
 
 class QAEmbeddingModel(nn.Module):
     """
-    Model for embedding questions and answers using DistilBERT
+    Model for embedding questions and answers using various transformer models
     with a projection layer to reduce dimensionality.
     """
-    def __init__(self, embed_dim=768, projection_dim=128):
+    def __init__(self, model_name="distilbert-base-uncased", projection_dim=128):
         super(QAEmbeddingModel, self).__init__()
-        # Load pretrained DistilBERT
-        self.bert = DistilBertModel.from_pretrained('distilbert-base-uncased')
+        # Load pretrained model
+        self.bert = AutoModel.from_pretrained(model_name)
+        # Get embedding dimension from model
+        self.embed_dim = self.bert.config.hidden_size
         # Projection layer to get embeddings of the desired dimension
-        self.projection = nn.Linear(embed_dim, projection_dim)
+        self.projection = nn.Linear(self.embed_dim, projection_dim)
         
     def forward(self, input_ids, attention_mask):
         """
@@ -3800,35 +3983,264 @@ class QAEmbeddingModel(nn.Module):
         return normalized
 
 ---
+./src/rank_test/optimized_dataset.py
+---
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+"""
+Optimized dataset module for QA ranking tasks.
+This is a high-performance implementation that supports various
+batch transformation strategies while minimizing processing overhead.
+"""
+
+import json
+import os
+import random
+import time
+import csv
+import sys
+from collections import defaultdict
+from typing import Callable, List, Dict, Tuple, Optional, Union
+from torch.utils.data import Dataset
+from tqdm import tqdm
+import torch
+from transformers import DistilBertTokenizerFast
+import re
+
+# Utility function to clean HTML tags from text
+def clean_html(text: str) -> str:
+    """Remove HTML tags from text"""
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+# Function to process a single batch
+def process_batch(
+    batch_data: List[Dict],
+    batch_transform_fn: Callable,
+    tokenizer,
+    max_length: int,
+    device: str = "cpu",
+    **kwargs
+) -> Tuple[Dict, int]:
+    """
+    Process a single batch of data with the transform function.
+    
+    Args:
+        batch_data: List of data items for this batch
+        batch_transform_fn: Function to transform the batch into model-ready format
+        tokenizer: Tokenizer for processing text
+        max_length: Maximum sequence length
+        device: Device to place tensors on
+        **kwargs: Additional parameters for the batch transform
+        
+    Returns:
+        Tuple of (processed_batch, doc_count)
+    """
+    # Apply the transform to create model-ready batch
+    result = batch_transform_fn(
+        batch_data,
+        tokenizer,
+        max_length,
+        device=device,
+        **kwargs
+    )
+    
+    # Handle return value (either just batch or doc count)
+    if isinstance(result, tuple) and len(result) == 2:
+        processed_batch, batch_docs = result
+    else:
+        processed_batch = result
+        # Estimate docs if not provided (backward compatibility) 
+        batch_docs = len(batch_data) * 2  # Rough estimate: 1 question + 1 answer per item
+        
+    if processed_batch:  # Skip empty batches
+        return (processed_batch, batch_docs)
+    return None
+
+class OptimizedQADataset(Dataset):
+    """
+    Optimized QA dataset with improved performance.
+    This dataset efficiently processes QA pairs for ranking tasks.
+    """
+    
+    def __init__(
+        self, 
+        data: list, 
+        batch_transform_fn: Callable, 
+        batch_size: int = 16, 
+        tokenizer = None,
+        max_length: int = 128,
+        shuffle: bool = True,
+        limit: int = None,
+        device: str = "cpu",
+        **kwargs
+    ):
+        """
+        Initialize the dataset with a specific batch transformation strategy.
+        
+        Args:
+            data: List of raw data items
+            batch_transform_fn: Function that transforms raw data to model-ready batches
+            batch_size: Batch size for pre-processing
+            tokenizer: Tokenizer to use (will create DistilBERT tokenizer if None)
+            max_length: Maximum sequence length for tokenization
+            shuffle: Whether to shuffle data during batch creation
+            limit: Maximum number of data items to use (applied before batching)
+            device: Device to place tensors on
+            **kwargs: Additional parameters for the batch transform function
+        """
+        start_time = time.time()
+        
+        # Store configuration
+        self.data = data
+        self.batch_transform_fn = batch_transform_fn
+        self.batch_size = batch_size
+        self.tokenizer = tokenizer or DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
+        self.max_length = max_length
+        self.shuffle = shuffle
+        self.limit = limit
+        self.device = device
+        self.kwargs = kwargs
+        
+        # Process the data
+        self.batches = self._create_batches()
+        
+        print(f"Dataset initialization completed in {time.time() - start_time:.2f} seconds")
+    
+    def _create_batches(self):
+        """
+        Create model-ready batches from raw data.
+        This implementation is optimized for performance.
+        """
+        start_time = time.time()
+        
+        # Apply limit if specified
+        data = self.data
+        if self.limit is not None:
+            data = data[:self.limit]
+            print(f"Limiting dataset to {self.limit} items")
+        
+        # Create batch indices
+        num_items = len(data)
+        indices = list(range(num_items))
+        
+        if self.shuffle:
+            random.shuffle(indices)
+        
+        # Group items into batches
+        batches = []
+        for i in range(0, num_items, self.batch_size):
+            batch_indices = indices[i:i+self.batch_size]
+            batch_data = [data[idx] for idx in batch_indices]
+            batches.append(batch_data)
+        
+        print(f"Created {len(batches)} batches from {num_items} items (batch size: {self.batch_size})")
+        
+        # Process batches
+        results = []
+        for batch_data in tqdm(batches, desc="Processing batches"):
+            batch_result = process_batch(
+                batch_data,
+                self.batch_transform_fn,
+                self.tokenizer,
+                self.max_length,
+                self.device,
+                **self.kwargs
+            )
+            if batch_result:  # Skip empty batches
+                results.append(batch_result)
+        
+        print(f"Batch processing completed in {time.time() - start_time:.2f} seconds")
+        return results
+    
+    def __len__(self):
+        """Return number of batches"""
+        return len(self.batches)
+    
+    def __getitem__(self, idx):
+        """Return a pre-processed batch"""
+        return self.batches[idx]
+    
+    @staticmethod
+    def get_dataloader(dataset, shuffle=False):
+        """
+        Return the dataset directly since batches are already pre-processed.
+        This removes the PyTorch DataLoader overhead.
+        """
+        return dataset
+
+
+# Utility functions for handling data files
+
+def parse_from_json(data_path: str, limit: int = None) -> list:
+    """
+    Load QA pairs from a JSON file.
+    
+    Args:
+        data_path: Path to the JSON file
+        limit: Maximum number of items to load
+        
+    Returns:
+        List of QA pairs
+    """
+    with open(data_path, 'r') as f:
+        data = json.load(f)
+        
+    if limit is not None:
+        data = data[:limit]
+        
+    return data
+
+def export_to_json(data: list, output_path: str = "data/ranked_qa.json") -> None:
+    """
+    Export QA pairs to a JSON file.
+    
+    Args:
+        data: List of QA pairs
+        output_path: Path to save the JSON file
+    """
+    print(f"Exporting data to {output_path}...")
+    
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    
+    print(f"Exported {len(data)} question-answer sets to {output_path}")
+
+# Import necessary functions from original dataset module
+from rank_test.dataset import ensure_dataset_exists
+
+---
 ./src/rank_test/train.py
 ---
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 """
-Simplified training module for QA ranking models.
+Training module for QA ranking models using HuggingFace datasets.
 Provides a streamlined training process with unified loss functions.
 """
 
+import random
 import time
 import torch
 import torch.optim as optim
 import wandb
-import json
-import random
 from tqdm import tqdm
-from transformers import DistilBertTokenizerFast
 
 from rank_test.config import ExperimentConfig
-from rank_test.models import QAEmbeddingModel
-from rank_test.dataset import (
-    QADataset, 
-    ensure_dataset_exists
-)
+from transformers import AutoTokenizer
 from rank_test.transforms import get_batch_transform
+from rank_test.models import QAEmbeddingModel
+from rank_test.optimized_dataset import OptimizedQADataset as QADataset, ensure_dataset_exists, parse_from_json
 from rank_test.losses import create_unified_loss
 from rank_test.evaluate import evaluate_model
-from argdantic import ArgParser
+from pydargs import parse
+from torch.profiler import profile, record_function, ProfilerActivity, tensorboard_trace_handler
+
+
 
 def get_device():
     """Get appropriate device for training"""
@@ -3843,11 +4255,9 @@ def get_device():
         print("Using CPU (No GPU acceleration available)")
     
     return device
-
-
 def create_dataloaders(config: ExperimentConfig):
     """
-    Create train and test dataloaders based on configuration
+    Optimized function to create train and test dataloaders.
     
     Args:
         config: ExperimentConfig object
@@ -3855,6 +4265,9 @@ def create_dataloaders(config: ExperimentConfig):
     Returns:
         Tuple of (train_loader, test_loader)
     """
+    start_time = time.time()
+    device = get_device()
+    
     # Ensure dataset exists
     data_path = config.data_path
     ensure_dataset_exists(
@@ -3863,15 +4276,15 @@ def create_dataloaders(config: ExperimentConfig):
         force_regenerate=config.force_regenerate
     )
     
-    # Create tokenizer
-    tokenizer = DistilBertTokenizerFast.from_pretrained('distilbert-base-uncased')
+    # Create tokenizer (shared between datasets)
+    tokenizer = AutoTokenizer.from_pretrained(config.model_name)
     
-    # Get batch transform function
-    batch_transform_fn = get_batch_transform(config.batch_transform)
+    # Get batch transform functions
+    train_transform_fn = get_batch_transform(config.batch_transform)
+    test_transform_fn = get_batch_transform("standardized_test")
     
-    # Load all data
-    with open(data_path, 'r') as f:
-        all_data = json.load(f)
+    # Load data once
+    all_data = parse_from_json(data_path)
     
     # Split data based on test size
     num_items = len(all_data)
@@ -3887,7 +4300,7 @@ def create_dataloaders(config: ExperimentConfig):
     test_indices = indices[:test_count]
     train_indices = indices[test_count:]
     
-    # Create train and test datasets
+    # Extract train and test data
     train_data = [all_data[i] for i in train_indices]
     test_data = [all_data[i] for i in test_indices]
     
@@ -3896,51 +4309,43 @@ def create_dataloaders(config: ExperimentConfig):
     # Create training dataset
     print("Creating training dataset")
     train_dataset = QADataset(
-        data_path=data_path,
-        batch_transform_fn=batch_transform_fn,
+        data=train_data,
+        batch_transform_fn=train_transform_fn,
         batch_size=config.get_batch_size(),
         tokenizer=tokenizer,
         max_length=128,
+        limit=config.get_limit(),
+        device=device,
         **config.get_batch_transform_kwargs()
     )
-    # Override raw data with train split
-    train_dataset.raw_data = train_data
-    # Recreate batches with train data
-    train_dataset.batches = train_dataset._create_batches()
     
-    # Create dataloader
-    train_loader = QADataset.get_dataloader(train_dataset, shuffle=True)
-    
-    # Create standardized test dataset
+    # Create test dataset with standardized format
     print("Creating standardized test dataset")
-    # Always use the standardized test transform regardless of training strategy
-    test_transform_fn = get_batch_transform("standardized_test")
     test_batch_size = min(len(test_data), config.get_batch_size() * 4)  # Use larger batches for testing
     
     test_dataset = QADataset(
-        data_path=data_path,
+        data=test_data,
         batch_transform_fn=test_transform_fn,
         batch_size=test_batch_size,
         tokenizer=tokenizer,
-        max_length=128
+        max_length=128,
+        device=device,
+        limit=None  # Use all test data
     )
-    # Override raw data with test split
-    test_dataset.raw_data = test_data
-    # Recreate batches with test data
-    test_dataset.batches = test_dataset._create_batches()
     
-    test_loader = QADataset.get_dataloader(test_dataset, shuffle=False)
+    # Get dataloaders (optimized dataset returns itself)
+    train_loader = train_dataset
+    test_loader = test_dataset
     
     print(f"Created training dataset with {len(train_dataset)} batches")
     print(f"Test dataset: {len(test_dataset)} batches")
+    print(f"Dataloader creation completed in {time.time() - start_time:.2f} seconds")
     
     return train_loader, test_loader
 
-cli = ArgParser()
-@cli.command()
 def train(config: ExperimentConfig):
     """
-    Simplified training function that uses unified loss functions
+    Training function using HuggingFace datasets
     
     Args:
         config: ExperimentConfig object
@@ -3948,184 +4353,158 @@ def train(config: ExperimentConfig):
     Returns:
         Trained model
     """
-    # Setup device, dataset, model
+    # Setup device
     device = get_device()
     
     # Initialize wandb if enabled
-    if config.log_to_wandb and wandb.run is None:
-        run_name = f"{config.loss_type}-{config.batch_transform}-{time.strftime('%Y%m%d-%H%M%S')}"
-        if config.name:
-            run_name = f"{config.name}-{time.strftime('%Y%m%d-%H%M%S')}"
-        
-        # Create a clean config for wandb logging
-        wandb_config = config.dict()
-        
+    if config.log_to_wandb:
+        print("Logging to wandb")
+        run_name = f"{config.name}-{time.strftime('%Y%m%d-%H%M%S')}"
         wandb.init(
             project=config.wandb_project,
             name=run_name,
-            config=wandb_config
+            config=config.__dict__
         )
         
-        # Log loss parameters as a table
-        loss_kwargs = config.get_loss_kwargs()
-        if loss_kwargs:
-            loss_params = [[k, str(v)] for k, v in loss_kwargs.items()]
-            wandb.log({"loss_parameters": wandb.Table(columns=["Parameter", "Value"], 
-                                                    data=loss_params)})
-    
+        # Log loss parameters
+        if config.get_loss_kwargs():
+            loss_params = [[k, str(v)] for k, v in config.get_loss_kwargs().items()]
+            wandb.log({"loss_parameters": wandb.Table(
+                columns=["Parameter", "Value"], 
+                data=loss_params
+            )})
+    else:
+        print("Not logging to wandb")
+
     # Create model
-    print(f"Creating model with embed_dim={config.embed_dim} and projection_dim={config.projection_dim}")
+    print(f"Creating model with {config.model_name}")
     model = QAEmbeddingModel(
-        embed_dim=config.embed_dim,
+        model_name=config.model_name,
         projection_dim=config.projection_dim
     ).to(device)
     
-    # Create dataset and dataloader
+    # Create dataloaders
     train_loader, test_loader = create_dataloaders(config)
     
-    # Create loss function with unified interface
+    # Create loss function
     loss_fn = create_unified_loss(config.loss_type, **config.get_loss_kwargs())
     print(f"Using loss function: {loss_fn.get_name()}")
     
     # Create optimizer
     optimizer = optim.AdamW(model.parameters(), lr=config.learning_rate)
-    
-    # Initial evaluation (if enabled)
-    if config.eval_at_zero and test_loader is not None:
-        print("\nRunning evaluation at step 0 (initial model)...")
-        try:
-            model.eval()
-            
-            # Run evaluation
-            initial_metrics = evaluate_model(model, test_loader, device)
-            
-            # Print metrics
-            print("Step 0 evaluation results:")
-            for metric_name, metric_value in initial_metrics.items():
-                if 'hard_neg' in metric_name:
-                    print(f"  {metric_name}: {metric_value:.4f}*")  # Mark fixed metrics
-                else:
-                    print(f"  {metric_name}: {metric_value:.4f}")
-            
-            # Log metrics to wandb
-            if wandb.run is not None:
-                initial_metrics_log = {f"eval/{k}": v for k, v in initial_metrics.items()}
-                initial_metrics_log["step"] = 0
-                wandb.log(initial_metrics_log)
-                
-            model.train()
-        except Exception as e:
-            print(f"Error during initial evaluation: {e}")
-            model.train()
-    
-    # Training loop
+
+    # Training loop with timing
     global_step = 0
-    cumulative_docs = 0
+    total_docs_processed = 0
+    total_train_time = 0
     
-    # Main training loop - epoch based with step counter
-    for epoch in range(config.get_epochs()):
-        for batch_data in tqdm(train_loader, desc=f"Epoch {epoch+1}"):
-            # Extract batch and document count
-            batch_doc_count = 0
-            if isinstance(batch_data, tuple) and len(batch_data) == 2:
-                batch, batch_doc_count = batch_data
-            else:
-                batch = batch_data
-                batch_doc_count = len(batch) * 2  # Estimate
-            
-            # Add batch doc count to running total
-            cumulative_docs += batch_doc_count
-            
-            # Process batch
-            model.train()
-            batch_start = time.time()
-            
-            # The key simplification: Unified interface for all loss functions
-            # Loss function handles different batch formats internally
-            loss, batch_metrics = loss_fn(model, batch, device)
-            
-            # Backward pass and optimization
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            
-            # Update global step
-            global_step += 1
-            
-            # Calculate batch time
-            batch_time = time.time() - batch_start
-            
-            # Log metrics for this batch
-            batch_metrics_log = {f"batch/{k}": v for k, v in batch_metrics.items()}
-            batch_metrics_log["batch/loss"] = loss.item()
-            batch_metrics_log["step"] = global_step
-            batch_metrics_log["epoch"] = epoch + 1
-            batch_metrics_log["cumulative_docs_seen"] = cumulative_docs
-            batch_metrics_log["docs_per_step"] = cumulative_docs / max(global_step, 1)
-            batch_metrics_log["batch/time"] = batch_time
-            
-            # Update progress bar with latest metrics
-            progress_desc = f"Epoch {epoch+1} | Step {global_step} | "
-            if 'acc' in batch_metrics:
-                progress_desc += f"Acc: {batch_metrics['acc']:.4f} | "
-            elif 'accuracy' in batch_metrics:
-                progress_desc += f"Acc: {batch_metrics['accuracy']:.4f} | "
-            elif 'ndcg' in batch_metrics:
-                progress_desc += f"NDCG: {batch_metrics['ndcg']:.4f} | "
-            progress_desc += f"Loss: {loss.item():.4f}"
-            
-            # Log to wandb
-            if wandb.run is not None:
-                wandb.log(batch_metrics_log)
-            
-            # Run evaluation if requested
-            if config.eval_steps and test_loader and global_step % config.eval_steps == 0:
-                # Temporarily switch to eval mode
-                model.eval()
-                
-                print(f"\nRunning evaluation at step {global_step}...")
-                try:
-                    # Run evaluation
-                    test_metrics = evaluate_model(model, test_loader, device)
-                    
-                    # Print metrics
-                    print(f"Step {global_step} evaluation results:")
-                    for metric_name, metric_value in test_metrics.items():
-                        if 'hard_neg' in metric_name:
-                            print(f"  {metric_name}: {metric_value:.4f}*") # Mark fixed metrics
-                        else:
-                            print(f"  {metric_name}: {metric_value:.4f}")
-                    
-                    # Log metrics
-                    if wandb.run is not None:
-                        test_metrics_log = {f"eval/{k}": v for k, v in test_metrics.items()}
-                        test_metrics_log["step"] = global_step
-                        wandb.log(test_metrics_log)
-                
-                except Exception as e:
-                    print(f"Error during evaluation: {e}")
-                
-                # Switch back to training mode
-                model.train()
+    print(f"Starting training for {config.epochs} epochs")
     
+    # Setup profiler
+    activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
+
+        
+    with profile(
+        activities=activities,
+        schedule=torch.profiler.schedule(
+            wait=1,
+            warmup=1,
+            active=3,
+            repeat=2
+        ),
+        on_trace_ready=tensorboard_trace_handler("./log/profiler"),
+        record_shapes=True,
+        profile_memory=True,
+        with_stack=True
+    ) as prof:
+        for epoch in range(config.epochs):
+            epoch_start = time.time()
+            batch_times = []
+            
+            for batch_idx, batch_data in enumerate(tqdm(train_loader, desc=f"Epoch {epoch+1}")):
+                if batch_idx % config.eval_steps == 0 and (batch_idx > 0 or config.eval_at_zero):
+                    model.eval()
+                    with torch.no_grad():
+                        eval_metrics = evaluate_model(model, test_loader, device)
+                        if wandb.run is not None:
+                            wandb.log({f"eval/{k}": v for k, v in eval_metrics.items()})
+                    model.train()
+                    
+                batch_start = time.time()
+                
+                # Unpack batch data
+                if isinstance(batch_data, tuple) and len(batch_data) == 2:
+                    batch, batch_docs = batch_data
+                else:
+                    batch, batch_docs = batch_data, None
+                
+                # Forward pass with profiling
+                with record_function("forward_pass"):
+                    loss, batch_metrics = loss_fn(model, batch, device)
+                
+                # Backward pass with profiling
+                with record_function("backward_pass"):
+                    with record_function("optimizer.zero_grad"):
+                        optimizer.zero_grad()
+                    with record_function("loss.backward"):
+                        loss.backward()
+                    with record_function("optimizer.step"):
+                        optimizer.step()
+                
+                # Update counters
+                global_step += 1
+                total_docs_processed += len(batch['scores']) if 'scores' in batch else 1
+                
+                # Record timing
+                batch_end = time.time()
+                batch_time = batch_end - batch_start
+                batch_times.append(batch_time)
+                
+                # Log metrics
+                if wandb.run is not None:
+                    metrics = {
+                        'train/loss': loss.item(),
+                        'train/step': global_step,
+                        'train/epoch': epoch + 1,
+                        'train/docs_processed': total_docs_processed,
+                        'train/docs_per_second': len(batch['scores']) / batch_time if 'scores' in batch else 1/batch_time,
+                        'train/batch_time': batch_time,
+                        **{f'train/{k}': v for k, v in batch_metrics.items()}
+                    }
+                    wandb.log(metrics)
+                
+                # Step profiler
+                prof.step()
+                
+                # Print occasional timing stats
+                if batch_idx % 50 == 0 and batch_idx > 0:
+                    avg_time = sum(batch_times[-10:]) / min(10, len(batch_times))
+                    speed = len(batch['scores']) / avg_time if 'scores' in batch else 1/avg_time
+                    print(f"  Batch {batch_idx}: {avg_time:.4f}s/batch, ~{speed:.1f} examples/s")
+                    
+                    # Print profiling stats
+                    print(prof.key_averages().table(
+                        sort_by="cpu_time_total",
+                        row_limit=100
+                    ))
+    
+            # End of epoch stats
+            epoch_time = time.time() - epoch_start
+            total_train_time += epoch_time
+            avg_batch_time = sum(batch_times) / len(batch_times)
+            print(f"Epoch {epoch+1} completed in {epoch_time:.2f}s ({avg_batch_time:.4f}s/batch avg)")
+            
+            # Export profiling data
+            prof.export_chrome_trace(f"trace_epoch_{epoch}.json")
+            
     # Final evaluation
     if test_loader is not None:
         print("\nRunning final evaluation...")
         model.eval()
-        final_metrics = evaluate_model(model, test_loader, device)
-        
-        # Print final metrics
-        print("\nFinal metrics:")
-        for k, v in final_metrics.items():
-            if 'hard_neg' in k:
-                print(f"  {k}: {v:.4f}*")  # Mark fixed metrics with an asterisk
-            else:
-                print(f"  {k}: {v:.4f}")
-        
-        # Log final metrics to wandb
-        if wandb.run is not None:
-            wandb.log({f"final/{k}": v for k, v in final_metrics.items()})
-            wandb.log({"step": global_step})
+        with torch.no_grad():
+            final_metrics = evaluate_model(model, test_loader, device)
+            if wandb.run is not None:
+                wandb.log({f"final/{k}": v for k, v in final_metrics.items()})
     
     # Finish wandb run
     if wandb.run is not None:
@@ -4133,6 +4512,9 @@ def train(config: ExperimentConfig):
     
     return model
 
+def cli():
+    config = parse(ExperimentConfig, add_config_file_argument=True)
+    train(config)
 
 if __name__ == "__main__":
     cli()
@@ -4160,9 +4542,7 @@ Each transformation can be used with the QADataset by setting the appropriate ba
 """
 
 import torch
-from typing import List, Dict, Callable, Tuple, Optional, Union
-from collections import defaultdict
-from tqdm import tqdm
+from typing import List, Dict, Callable, Tuple
 import re
 
 def clean_html(text: str) -> str:
@@ -4177,6 +4557,7 @@ def infonce_batch_transform(
     tokenizer, 
     max_length: int, 
     take_top: bool = True,
+    device="cpu",
     **kwargs
 ) -> Tuple[Dict, int]:
     """
@@ -4652,6 +5033,7 @@ def standardized_test_transform(
     batch_data: List[Dict], 
     tokenizer, 
     max_length: int,
+    device="cpu",
     **kwargs
 ) -> Tuple[Dict, int]:
     """

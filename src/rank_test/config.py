@@ -23,16 +23,16 @@ class ExperimentConfig:
     # Experiment metadata
     name: Optional[str] = Field(default=None, description="Name of the experiment")
     
+    # Model settings
+    model_name: str = Field(default="distilbert-base-uncased", description="Name of the pretrained model to use")
+    projection_dim: int = Field(default=128, description="Dimension for embeddings projection")
+    
     # Data settings
     data_path: str = Field(default="data/ranked_qa.json", description="Path to the dataset JSON file")
     limit: Optional[int] = Field(default=None, description="Limit the number of samples to process")
     test_size: float = Field(default=0.2, description="Proportion of data to use for testing")
     seed: int = Field(default=42, description="Random seed for reproducibility")
     force_regenerate: bool = Field(default=False, description="Force dataset regeneration")
-    
-    # Model settings
-    embed_dim: int = Field(default=768, description="Embedding dimension from BERT")
-    projection_dim: int = Field(default=128, description="Dimension for embeddings projection")
     
     # Training settings
     batch_size: int = Field(default=64, description="Training batch size")
