@@ -12,6 +12,7 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import pandas as pd
 from collections import defaultdict
+from rank_test.transforms import unpack_batch
 
 def ndcg_at_k(relevances, k):
     """
@@ -138,26 +139,21 @@ def evaluate_standardized_test(model, test_dataloader, device, k_values=[1, 5, 1
     # Process each batch
     with torch.no_grad():
         for batch_data in tqdm(test_dataloader, desc="Calculating embeddings"):
-            if isinstance(batch_data, tuple):
-                batch, _ = batch_data
-            else:
-                batch = batch_data
-                
-            for item in batch:
+            for batch in unpack_batch(batch_data):
                 # Skip items without answers
-                if 'answers' not in item or not item['answers']:
+                if 'answers' not in batch or not batch['answers']:
                     continue
                 
                 total_questions += 1
                 
                 # Calculate question embedding
                 q_embedding = model(
-                    item['q_input_ids'].unsqueeze(0).to(device),
-                    item['q_attention_mask'].unsqueeze(0).to(device)
+                    batch['q_input_ids'].unsqueeze(0).to(device),
+                    batch['q_attention_mask'].unsqueeze(0).to(device)
                 )
                 
                 # Process all answers for this question
-                answers = item['answers']
+                answers = batch['answers']
                 all_similarities = []
                 has_hard_negative = False
                 
@@ -287,18 +283,12 @@ def evaluate_model(model, test_dataloader, device, k_values=[1, 5, 10], debug_ou
     """
     # Check the first batch to determine the format
     for batch_data in test_dataloader:
-        # Extract batch if it comes with document count
-        if isinstance(batch_data, tuple) and len(batch_data) == 2:
-            batch = batch_data[0]
-        else:
-            batch = batch_data
-            
-        # Check if this is a standardized test batch
-        if isinstance(batch, list) and 'answers' in batch[0] and isinstance(batch[0]['answers'], list):
-            return evaluate_standardized_test(model, test_dataloader, device, k_values, debug_output)
-            
-        break  # Only need to check first batch
-        
+        for batch in unpack_batch(batch_data):
+            # If this is a standardized test batch (list of dicts with 'answers')
+            if isinstance(batch, dict) and 'answers' in batch and isinstance(batch['answers'], list):
+                return evaluate_standardized_test(model, test_dataloader, device, k_values, debug_output)
+            break  # Only need to check first batch
+        break
     # Default to original implementation for backward compatibility
     model.eval()
     
@@ -309,49 +299,47 @@ def evaluate_model(model, test_dataloader, device, k_values=[1, 5, 10], debug_ou
     
     # Extract data to track which answers belong to which questions
     question_data = defaultdict(list)  # Map question ID to list of answer indices
-    
+    times = []
     # Calculate embeddings for each item
     with torch.no_grad():
         start_idx = 0  # Track the absolute index in the final concatenated tensor
         
         for batch_idx, batch_data in enumerate(tqdm(test_dataloader, desc="Calculating embeddings")):
-            # Extract batch if it comes with document count
-            if isinstance(batch_data, tuple) and len(batch_data) == 2:
-                batch = batch_data[0]
-            else:
-                batch = batch_data
+            for batch in unpack_batch(batch_data):
+                # Get embeddings
+                q_embeddings = model(batch['q_input_ids'].to(device), 
+                                    batch['q_attention_mask'].to(device))
+                a_embeddings = model(batch['a_input_ids'].to(device), 
+                                    batch['a_attention_mask'].to(device))
                 
-            # Get embeddings
-            q_embeddings = model(batch['q_input_ids'].to(device), 
-                                batch['q_attention_mask'].to(device))
-            a_embeddings = model(batch['a_input_ids'].to(device), 
-                                batch['a_attention_mask'].to(device))
-            
-            # Store embeddings
-            all_q_embeddings.append(q_embeddings.cpu())
-            all_a_embeddings.append(a_embeddings.cpu())
-            
-            # Track question IDs from batch
-            batch_size = q_embeddings.shape[0]
-            
-            # Use question_id from batch, or create dummy IDs if not available
-            if 'question_id' in batch:
-                q_ids = batch['question_id']
-            elif 'question_ids' in batch:
-                q_ids = batch['question_ids']
-            else:
-                q_ids = [f"batch{batch_idx}_item{i}" for i in range(batch_size)]
+                # Store embeddings
+                all_q_embeddings.append(q_embeddings.cpu())
+                all_a_embeddings.append(a_embeddings.cpu())
                 
-            all_question_ids.extend(q_ids)
-            
-            # Store which answers belong to which questions
-            for i in range(batch_size):
-                idx = start_idx + i  # Absolute index in the concatenated tensor
-                q_id = q_ids[i]
-                question_data[q_id].append(idx)
-            
-            # Update the start index for the next batch
-            start_idx += batch_size
+                # Track question IDs from batch
+                batch_size = q_embeddings.shape[0]
+                
+                # Use question_id from batch, or create dummy IDs if not available
+                if 'question_id' in batch:
+                    q_ids = batch['question_id']
+                elif 'question_ids' in batch:
+                    q_ids = batch['question_ids']
+                else:
+                    q_ids = [f"batch{batch_idx}_item{i}" for i in range(batch_size)]
+                
+                all_question_ids.extend(q_ids)
+                
+                # Store which answers belong to which questions
+                for i in range(batch_size):
+                    idx = start_idx + i  # Absolute index in the concatenated tensor
+                    q_id = q_ids[i]
+                    question_data[q_id].append(idx)
+                
+                # Update the start index for the next batch
+                start_idx += batch_size
+            time_end = time.time()
+            time_taken = time_end - time_start
+            times.append(time_taken)
     
     # Concatenate all embeddings
     all_q_embeddings = torch.cat(all_q_embeddings, dim=0)

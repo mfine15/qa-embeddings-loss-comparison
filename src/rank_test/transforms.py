@@ -18,7 +18,7 @@ Each transformation can be used with the QADataset by setting the appropriate ba
 """
 
 import torch
-from typing import List, Dict, Callable, Tuple
+from typing import List, Dict, Callable
 import re
 
 def clean_html(text: str) -> str:
@@ -35,7 +35,7 @@ def infonce_batch_transform(
     take_top: bool = True,
     device="cpu",
     **kwargs
-) -> Tuple[Dict, int]:
+) -> Dict:
     """
     Standard InfoNCE transform with batched tokenization for better performance.
     
@@ -96,7 +96,7 @@ def infonce_batch_transform(
         doc_count += 2
     
     if not questions_to_tokenize:
-        return None, 0
+        return {"items": []}
         
     # Batch tokenize questions
     q_encodings = tokenizer(
@@ -128,7 +128,7 @@ def infonce_batch_transform(
         'ranks': torch.tensor(ranks, dtype=torch.long)
     }
     
-    return batch, doc_count
+    return {"batch": batch, "doc_count": doc_count}
 
 
 def multiple_positives_batch_transform(
@@ -137,7 +137,7 @@ def multiple_positives_batch_transform(
     max_length: int, 
     pos_count: int = 3,
     **kwargs
-) -> Tuple[Dict, int]:
+) -> Dict:
     """
     Multiple positives transform for contrastive learning.
     
@@ -202,7 +202,7 @@ def multiple_positives_batch_transform(
             ranks.append(rank)                    # Ordinal rank (position)
     
     if not q_input_ids:
-        return None, 0
+        return {"items": []}
         
     # Create final batch
     batch = {
@@ -216,7 +216,7 @@ def multiple_positives_batch_transform(
         'ranks': torch.tensor(ranks, dtype=torch.long)       # Ordinal ranks
     }
     
-    return batch, doc_count
+    return {"batch": batch, "doc_count": doc_count}
 
 
 def hard_negative_batch_transform(
@@ -285,7 +285,7 @@ def hard_negative_batch_transform(
             'answer_count': len(a_encodings)
         })
     
-    return batch_items
+    return {"items": batch_items}
 
 
 def triplet_batch_transform(
@@ -408,7 +408,7 @@ def triplet_batch_transform(
         neg_scores.append(neg_score)
     
     if not q_input_ids:
-        return None
+        return {"items": []}
         
     # Create final batch
     batch = {
@@ -423,7 +423,7 @@ def triplet_batch_transform(
         'neg_scores': torch.tensor(neg_scores, dtype=torch.float32)
     }
     
-    return batch
+    return {"batch": batch}
 
 
 def listwise_batch_transform(
@@ -502,7 +502,7 @@ def listwise_batch_transform(
             'answer_count': len(scores)
         })
     
-    return batch_items
+    return {"items": batch_items}
 
 
 def standardized_test_transform(
@@ -511,7 +511,7 @@ def standardized_test_transform(
     max_length: int,
     device="cpu",
     **kwargs
-) -> Tuple[Dict, int]:
+) -> Dict:
     """
     Creates a standardized test batch with positive, hard negative, and 
     normal negative samples for each question.
@@ -620,7 +620,7 @@ def standardized_test_transform(
         # One question + all its answers
         doc_count += 1 + len(item['answers'])
     
-    return test_items, doc_count
+    return {"items": test_items, "doc_count": doc_count}
 
 
 # Factory function to get the transform function by name
@@ -650,3 +650,17 @@ def get_batch_transform(transform_name: str) -> Callable:
         raise ValueError(f"Unknown transform: {transform_name}. Available transforms: {list(transforms.keys())}")
     
     return transforms[transform_name]
+
+# Utility function to unpack standardized batch dicts
+def unpack_batch(batch_data):
+    """Given a standardized batch dict, return a list of batch dicts to process."""
+    if batch_data is None:
+        return []
+    if isinstance(batch_data, tuple):
+        batch_data = batch_data[0]
+    if isinstance(batch_data, dict):
+        if "batch" in batch_data:
+            return [batch_data["batch"]]
+        elif "items" in batch_data:
+            return batch_data["items"]
+    return []
