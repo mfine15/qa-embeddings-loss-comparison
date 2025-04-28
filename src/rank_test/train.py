@@ -257,7 +257,7 @@ def train(config: ExperimentConfig):
                 prof.step()
                 
                 # Print occasional timing stats
-                if batch_idx % 10 == 0 and batch_idx > 0:
+                if batch_idx % 50 == 0 and batch_idx > 0:
                     avg_time = sum(batch_times[-10:]) / min(10, len(batch_times))
                     speed = len(batch['scores']) / avg_time if 'scores' in batch else 1/avg_time
                     print(f"  Batch {batch_idx}: {avg_time:.4f}s/batch, ~{speed:.1f} examples/s")
@@ -265,7 +265,7 @@ def train(config: ExperimentConfig):
                     # Print profiling stats
                     print(prof.key_averages().table(
                         sort_by="cuda_time_total" if torch.cuda.is_available() else "cpu_time_total",
-                        row_limit=10
+                        row_limit=50
                     ))
     
             # End of epoch stats
